@@ -1,0 +1,152 @@
+use std::sync::Arc;
+
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    http::{
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE, ORIGIN, VARY,
+        },
+        HeaderMap, HeaderValue, StatusCode,
+    },
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::json;
+
+use crate::{
+    api,
+    error::{Error, Result},
+    network::Network,
+};
+
+const MAX_BODY_BYTES: usize = 8 * 1024;
+
+pub struct Options {
+    pub port: u16,
+    pub network: Network,
+    pub archives: Vec<String>,
+    pub archives_pinned: bool,
+    pub origins: Vec<String>,
+}
+
+pub async fn run(options: Options) -> Result<()> {
+    let address = format!("0.0.0.0:{}", options.port);
+
+    println!("scp-verify serving on {address}");
+
+    if options.origins.is_empty() {
+        println!("  no CORS origins configured; browsers will be refused");
+    } else {
+        println!("  CORS origins: {}", options.origins.join(", "));
+    }
+
+    let state = Arc::new(options);
+    let router = Router::new()
+        .route("/health", get(health))
+        .route("/mutations", get(mutations))
+        .route("/verify", post(verify))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .with_state(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind(&address)
+        .await
+        .map_err(|error| Error::ServeBind {
+            address: address.clone(),
+            detail: error.to_string(),
+        })?;
+
+    axum::serve(listener, router)
+        .await
+        .map_err(|error| Error::ServeWriteResponse {
+            detail: error.to_string(),
+        })
+}
+
+fn cors_headers(options: &Options, incoming: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let origin = incoming
+        .get(ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|origin| options.origins.iter().any(|allowed| allowed == origin));
+
+    if let Some(origin) = origin {
+        if let Ok(value) = HeaderValue::from_str(origin) {
+            headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
+            headers.insert(
+                ACCESS_CONTROL_ALLOW_METHODS,
+                HeaderValue::from_static("POST,GET,OPTIONS"),
+            );
+            headers.insert(
+                ACCESS_CONTROL_ALLOW_HEADERS,
+                HeaderValue::from_static("content-type"),
+            );
+            headers.insert(VARY, HeaderValue::from_static("Origin"));
+        }
+    }
+
+    headers
+}
+
+async fn health(State(options): State<Arc<Options>>, incoming: HeaderMap) -> Response {
+    (
+        StatusCode::OK,
+        cors_headers(&options, &incoming),
+        Json(json!({"status": "ok"})),
+    )
+        .into_response()
+}
+
+async fn mutations(State(options): State<Arc<Options>>, incoming: HeaderMap) -> Response {
+    (
+        StatusCode::OK,
+        cors_headers(&options, &incoming),
+        Json(api::mutations()),
+    )
+        .into_response()
+}
+
+async fn verify(
+    State(options): State<Arc<Options>>,
+    incoming: HeaderMap,
+    body: String,
+) -> Response {
+    let headers = cors_headers(&options, &incoming);
+    let request: api::Request = match serde_json::from_str(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            let detail = Error::ServeParseBody {
+                detail: error.to_string(),
+            };
+
+            return (
+                StatusCode::BAD_REQUEST,
+                headers,
+                Json(json!({"error": detail.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let outcome = api::verify(
+        &request,
+        &api::Options {
+            network: options.network,
+            archives: options.archives.clone(),
+            archives_pinned: options.archives_pinned,
+        },
+    )
+    .await;
+
+    match outcome {
+        Ok(report) => (StatusCode::OK, headers, Json(report)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            headers,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}

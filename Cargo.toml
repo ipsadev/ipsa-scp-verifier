@@ -1,0 +1,64 @@
+[package]
+name = "ipsa-scp-verifier"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.81.0"
+license = "Apache-2.0"
+description = "Independently verify Stellar SCP consensus for a single ledger, step by step"
+readme = "README.md"
+keywords = ["stellar", "scp", "consensus", "light-client", "verification"]
+categories = ["cryptography", "command-line-utilities"]
+repository = "https://github.com/ipsadev/scp-verifier"
+documentation = "https://docs.rs/scp-verifier"
+exclude = ["tests/fixtures/*", "core-oracle/*", "target/*"]
+
+[workspace]
+members = ["tools"]
+
+[lib]
+name = "ipsa_scp_verifier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ipsa-scp-verify"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["io", "dep:clap", "serve"]
+serve = ["io", "dep:axum"]
+io = ["dep:reqwest", "dep:flate2", "dep:tokio", "dep:futures"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"], optional = true }
+ed25519-dalek = "2"
+flate2 = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+futures = { version = "0.3", optional = true }
+axum = { version = "0.8", optional = true }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+stellar-strkey = "0.0.13"
+stellar-xdr = { version = "27.0.0", features = ["std", "cap_0083"] }
+sha2 = "0.10"
+stellar-consensus-verifier = "1.0.0"
+thiserror = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "deny", priority = 2 }
+
+[lints.clippy]
+use_self = "warn"
+
+[profile.release]
+lto = true
+opt-level = 3
+overflow-checks = true
+
