@@ -1,13 +1,15 @@
 use tools::sync::*;
 
 #[test]
-fn substitutions_apply_in_order() {
+fn the_scp_rule_is_applied_before_the_error_rule() {
     let out = substitute(
-        "use crate::error::ContractError;\nfn f() -> ContractError",
-        &VENDOR_RULES,
+        "use crate::scp::error::ScpError;\nuse crate::error::Local;",
+        &VERIFY_RULES,
     );
-    assert!(out.starts_with("use crate::scp::error::ScpError;"));
-    assert!(out.ends_with("fn f() -> ScpError"));
+    assert_eq!(
+        out,
+        "use stellar_consensus_verifier::error::ScpError;\nuse super::error::Local;"
+    );
 }
 
 #[test]
