@@ -294,12 +294,7 @@ pub fn evaluate(
     }
 
     for envelope in &envelopes {
-        if let Err(error) = steps::verify_envelope_signature(
-            &envelope.node_id,
-            &envelope.statement_bytes,
-            &envelope.signature,
-            &input.network_id,
-        ) {
+        if let Err(error) = steps::verify_envelope_signature(envelope, &input.network_id) {
             report(failed(1, "envelope signatures", &error));
 
             return finish(input, mutation, steps_out, 0, None, evidence);
@@ -519,12 +514,8 @@ fn next_envelopes(input: &HeaderInput, config: &QuorumConfig) -> Result<Vec<u8>,
     for raw in &input.envelopes_xdr {
         let envelope = steps::validate_externalize(raw, input.slot)?;
 
-        steps::verify_envelope_signature(
-            &envelope.node_id,
-            &envelope.statement_bytes,
-            &envelope.signature,
-            &input.network_id,
-        )?;
+        steps::verify_envelope_signature(&envelope, &input.network_id)?;
+
         envelopes.push(envelope);
     }
 

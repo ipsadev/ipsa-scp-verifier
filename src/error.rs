@@ -24,8 +24,6 @@ pub enum VerifyError {
     },
     #[error("node {node_id} is not a valid Ed25519 public key")]
     InvalidPublicKey { node_id: String },
-    #[error("signature from {node_id} is {len} bytes, expected 64")]
-    MalformedSignature { node_id: String, len: usize },
     #[error("invalid Ed25519 signature from {node_id}")]
     InvalidSignature { node_id: String },
     #[error("no quorum-set preimage for {node_id} (commitQuorumSetHash {hash})")]

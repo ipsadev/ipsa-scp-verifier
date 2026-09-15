@@ -3,19 +3,26 @@ use ipsa_scp_verifier::steps::*;
 use sha2::{Digest, Sha256};
 
 #[test]
-fn preimage_is_network_then_type_then_statement() {
+fn signing_payload_is_network_then_type_then_statement() {
     let net = [0xabu8; 32];
-    let stmt = b"statement-bytes";
-    let p = signing_preimage(&net, stmt);
+    let raw = externalize_envelope_xdr(152);
+    let env = validate_externalize(&raw, 4_160_279).expect("valid");
+
+    let p = env.signing_payload(&net);
+
     assert_eq!(&p[..32], &net);
     assert_eq!(&p[32..36], &[0, 0, 0, 1]);
-    assert_eq!(&p[36..], stmt);
-    assert_eq!(p.len(), 32 + 4 + stmt.len());
+    assert_eq!(&p[36..], &env.statement_bytes[..]);
+    assert_eq!(p.len(), 32 + 4 + env.statement_bytes.len());
 }
 
 fn externalize_envelope_xdr(value_len: usize) -> Vec<u8> {
+    envelope_xdr_signed_by(&[0xaau8; 32], value_len)
+}
+
+fn envelope_xdr_signed_by(node_id: &[u8; 32], value_len: usize) -> Vec<u8> {
     let mut out = 0u32.to_be_bytes().to_vec();
-    out.extend_from_slice(&[0xaau8; 32]);
+    out.extend_from_slice(node_id);
     out.extend_from_slice(&4_160_279u64.to_be_bytes());
     out.extend_from_slice(&2i32.to_be_bytes());
     out.extend_from_slice(&1u32.to_be_bytes());
@@ -53,17 +60,23 @@ fn a_public_key_that_is_not_a_curve_point_is_refused() {
     let mut node_id = [0u8; 32];
     node_id[31] = 0x7f;
 
+    let raw = envelope_xdr_signed_by(&node_id, 152);
+    let env = validate_externalize(&raw, 4_160_279).expect("valid");
+
     assert!(matches!(
-        verify_envelope_signature(&node_id, b"stmt", &[0u8; 64], &[0u8; 32]),
+        verify_envelope_signature(&env, &[0u8; 32]),
         Err(VerifyError::InvalidPublicKey { .. })
     ));
 }
 
 #[test]
-fn a_signature_of_the_wrong_length_is_refused() {
+fn a_signature_that_does_not_verify_is_refused() {
+    let raw = externalize_envelope_xdr(152);
+    let env = validate_externalize(&raw, 4_160_279).expect("valid");
+
     assert!(matches!(
-        verify_envelope_signature(&[0u8; 32], b"stmt", &[0u8; 32], &[0u8; 32]),
-        Err(VerifyError::MalformedSignature { .. })
+        verify_envelope_signature(&env, &[0u8; 32]),
+        Err(VerifyError::InvalidSignature { .. })
     ));
 }
 

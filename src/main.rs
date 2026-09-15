@@ -915,12 +915,7 @@ fn verify_and_report(
     );
 
     for (index, env) in envelopes.iter().enumerate() {
-        steps::verify_envelope_signature(
-            &env.node_id,
-            &env.statement_bytes,
-            &env.signature,
-            &input.network_id,
-        )?;
+        steps::verify_envelope_signature(env, &input.network_id)?;
 
         if list_signers {
             report::item(&format!(
@@ -1110,12 +1105,7 @@ fn verify_and_report(
                 .collect::<core::result::Result<Vec<_>, _>>()?;
 
             for env in &next_envelopes {
-                steps::verify_envelope_signature(
-                    &env.node_id,
-                    &env.statement_bytes,
-                    &env.signature,
-                    &input.network_id,
-                )?;
+                steps::verify_envelope_signature(env, &input.network_id)?;
             }
 
             report::ok(&format!(
