@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
-use crate::scp::ballot::{authenticate, confirmed_value, Authenticated};
+use crate::scp::ballot::{authenticate, confirmed_value, verify_signature, Authenticated};
 use crate::scp::envelope::{Envelope, Externalize};
 use crate::scp::error::ScpError;
 use crate::scp::ledger::{tx_set_hash_of_value, LedgerHeader};
@@ -12,8 +12,6 @@ use crate::scp::results;
 use crate::scp::txset;
 
 use crate::error::VerifyError;
-
-pub const ENVELOPE_TYPE_SCP: [u8; 4] = [0, 0, 0, 1];
 
 type Result<T> = core::result::Result<T, VerifyError>;
 
@@ -71,37 +69,22 @@ impl QuorumConfig {
     }
 }
 
-pub fn signing_preimage(network_id: &[u8; 32], raw_statement_xdr: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(32 + 4 + raw_statement_xdr.len());
+pub fn verify_envelope_signature(envelope: &Envelope, network_id: &[u8; 32]) -> Result<()> {
+    let node_id = &envelope.node_id;
 
-    output.extend_from_slice(network_id);
-    output.extend_from_slice(&ENVELOPE_TYPE_SCP);
-    output.extend_from_slice(raw_statement_xdr);
-    output
-}
-
-pub fn verify_envelope_signature(
-    node_id: &[u8; 32],
-    raw_statement_xdr: &[u8],
-    signature: &[u8],
-    network_id: &[u8; 32],
-) -> Result<()> {
-    let key = VerifyingKey::from_bytes(node_id).map_err(|_| VerifyError::InvalidPublicKey {
+    VerifyingKey::from_bytes(node_id).map_err(|_| VerifyError::InvalidPublicKey {
         node_id: hex::encode(node_id),
     })?;
-    let signature_bytes: [u8; 64] =
-        signature
-            .try_into()
-            .map_err(|_| VerifyError::MalformedSignature {
-                node_id: hex::encode(node_id),
-                len: signature.len(),
-            })?;
-    let preimage = signing_preimage(network_id, raw_statement_xdr);
 
-    key.verify_strict(&preimage, &Signature::from_bytes(&signature_bytes))
-        .map_err(|_| VerifyError::InvalidSignature {
-            node_id: hex::encode(node_id),
-        })
+    let preimage = envelope.signing_payload(network_id);
+
+    if verify_signature(node_id, &preimage, &envelope.signature) {
+        return Ok(());
+    }
+
+    Err(VerifyError::InvalidSignature {
+        node_id: hex::encode(node_id),
+    })
 }
 
 fn from_scp(error: ScpError, signers: usize) -> VerifyError {

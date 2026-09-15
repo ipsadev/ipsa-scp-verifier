@@ -511,12 +511,7 @@ fn externalized_value(
     steps::reject_duplicate_signers(&envelopes)?;
 
     for env in &envelopes {
-        steps::verify_envelope_signature(
-            &env.node_id,
-            &env.statement_bytes,
-            &env.signature,
-            &input.network_id,
-        )?;
+        steps::verify_envelope_signature(env, &input.network_id)?;
     }
 
     let preimages = steps::index_quorum_sets(&input.quorum_sets_xdr)?;
