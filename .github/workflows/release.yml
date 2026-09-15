@@ -1,0 +1,122 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag to release (e.g. v1.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "run every gate but do not publish"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: gate, publish, announce
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: the tag must match the crate version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "tag $TAG matches crate version $version"
+
+      - name: the version must not already be on crates.io
+        run: |
+          body="$(curl -sS --max-time 30 \
+            -H 'User-Agent: ipsadev-release (github actions)' \
+            "https://crates.io/api/v1/crates/ipsa-scp-verifier/$VERSION")"
+
+          if printf '%s' "$body" | grep -q '"version"'; then
+            echo "::error::ipsa-scp-verifier $VERSION is already published; crates.io versions cannot be replaced"
+            exit 1
+          fi
+          echo "$VERSION is not published yet"
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@1.91.1
+        with:
+          components: rustfmt, clippy
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: setup just
+        uses: extractions/setup-just@v3
+
+      - name: cache cargo-audit binary
+        id: cache-cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-latest-1
+
+      - name: install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
+
+      - name: just ci
+        run: just ci
+
+      - name: package, and compile what crates.io would receive
+        run: just package
+
+      - name: publish, for real this time
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+      - name: say what a dry run skipped
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: echo "::notice::dry run - every gate passed, nothing was published"
+
+      - name: announce the release
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            printf 'Independent Stellar SCP consensus verification, %s.\n\n' "$TAG"
+            printf '```toml\n'
+            printf 'ipsa-scp-verifier = "%s"\n' "$VERSION"
+            printf '```\n\n'
+            printf '- [crates.io](https://crates.io/crates/ipsa-scp-verifier/%s)\n' "$VERSION"
+            printf '- [docs.rs](https://docs.rs/ipsa-scp-verifier/%s)\n\n' "$VERSION"
+            printf 'Published from %s after `just ci`: fmt, clippy over the workspace, the test suite, and `cargo audit`.\n' "$TAG"
+          } > /tmp/notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file /tmp/notes.md
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
+          fi

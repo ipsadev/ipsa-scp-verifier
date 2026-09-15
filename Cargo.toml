@@ -8,8 +8,8 @@ description = "Independently verify Stellar SCP consensus for a single ledger, s
 readme = "README.md"
 keywords = ["stellar", "scp", "consensus", "light-client", "verification"]
 categories = ["cryptography", "command-line-utilities"]
-repository = "https://github.com/ipsadev/scp-verifier"
-documentation = "https://docs.rs/scp-verifier"
+repository = "https://github.com/ipsadev/ipsa-scp-verifier"
+documentation = "https://docs.rs/ipsa-scp-verifier"
 exclude = ["tests/fixtures/*", "core-oracle/*", "target/*"]
 
 [workspace]

@@ -1,41 +1,73 @@
 name: ci
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  rust:
+    name: fmt, lint, test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@1.91.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
 
-      - name: fmt
-        run: cargo fmt --all -- --check
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: setup just
+        uses: extractions/setup-just@v3
 
-      - name: test
-        run: cargo test --workspace --all-targets
+      - name: cache cargo-audit binary
+        id: cache-cargo-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-latest-1
+
+      - name: install cargo-audit
+        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
+
+      - name: just ci
+        run: just ci
 
   live:
+    name: verify a real mainnet ledger
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: verify a real mainnet ledger
-        run: cargo run --release -- --ledger 63907880 --negative
+      - name: checkout
+        uses: actions/checkout@v4
 
-      - name: cross-check the same ledger
-        run: cargo tools chain-check --network mainnet --ledger 63907880
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: setup just
+        uses: extractions/setup-just@v3
+
+      - name: just live
+        run: just live
