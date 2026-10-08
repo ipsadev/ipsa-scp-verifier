@@ -1,6 +1,6 @@
 [package]
 name = "ipsa-scp-verifier"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.81.0"
 license = "Apache-2.0"
@@ -44,7 +44,7 @@ serde_json = "1"
 stellar-strkey = "0.0.13"
 stellar-xdr = { version = "27.0.0", features = ["std", "cap_0083"] }
 sha2 = "0.10"
-stellar-consensus-verifier = "1.0.0"
+stellar-consensus-verifier = "1.0.1"
 thiserror = "1"
 
 [dev-dependencies]

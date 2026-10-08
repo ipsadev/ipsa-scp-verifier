@@ -6,8 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "tag to release (e.g. v1.1.0)"
-        required: true
+        description: "tag to release (e.g. v2.0.1); leave empty with dry_run to rehearse the branch this runs from"
+        required: false
+        default: ""
         type: string
       dry_run:
         description: "run every gate but do not publish"
@@ -24,7 +25,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
 
 jobs:
   release:
@@ -37,30 +38,58 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ env.TAG || github.ref }}
           fetch-depth: 0
 
       - name: the tag must match the crate version
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          if [ "$TAG" != "v$version" ]; then
+          crate="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "CRATE=$crate" >> "$GITHUB_ENV"
+          if [ -z "$TAG" ]; then
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "::error::a release needs a tag; to rehearse without one, run with dry_run"
+              exit 1
+            fi
+            echo "TAG=v$version" >> "$GITHUB_ENV"
+            echo "::notice::rehearsing v$version from $GITHUB_REF_NAME, no tag needed"
+          elif [ "$TAG" != "v$version" ]; then
             echo "::error::tag $TAG does not match Cargo.toml version $version"
             exit 1
+          else
+            echo "tag $TAG matches crate version $version"
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "tag $TAG matches crate version $version"
 
-      - name: the version must not already be on crates.io
+      - name: the version must not already be on crates.io, unless it came from this commit
         run: |
           body="$(curl -sS --max-time 30 \
             -H 'User-Agent: ipsadev-release (github actions)' \
-            "https://crates.io/api/v1/crates/ipsa-scp-verifier/$VERSION")"
+            "https://crates.io/api/v1/crates/$CRATE/$VERSION")"
 
-          if printf '%s' "$body" | grep -q '"version"'; then
-            echo "::error::ipsa-scp-verifier $VERSION is already published; crates.io versions cannot be replaced"
+          if ! printf '%s' "$body" | grep -q '"version"'; then
+            echo "$VERSION is not published yet"
+            exit 0
+          fi
+
+          curl -sSfL --max-time 60 \
+            -H 'User-Agent: ipsadev-release (github actions)' \
+            -o /tmp/published.crate \
+            "https://static.crates.io/crates/$CRATE/$CRATE-$VERSION.crate"
+
+          published="$(tar -xzOf /tmp/published.crate "$CRATE-$VERSION/.cargo_vcs_info.json" \
+            | sed -n 's/.*"sha1": *"\([0-9a-f]*\)".*/\1/p')"
+          commit="$(git rev-parse HEAD)"
+
+          if [ "$published" != "$commit" ]; then
+            echo "::error::$CRATE $VERSION is already published from ${published:-an unknown commit}, not $commit; crates.io versions cannot be replaced"
             exit 1
           fi
-          echo "$VERSION is not published yet"
+
+          echo "PUBLISHED=true" >> "$GITHUB_ENV"
+          echo "::notice::$CRATE $VERSION is already published from this commit; announcing it without publishing again"
 
       - name: setup rust
         uses: dtolnay/rust-toolchain@1.91.1
@@ -91,7 +120,7 @@ jobs:
         run: just package
 
       - name: publish, for real this time
-        if: ${{ github.event.inputs.dry_run != 'true' }}
+        if: ${{ github.event.inputs.dry_run != 'true' && env.PUBLISHED != 'true' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
@@ -108,11 +137,11 @@ jobs:
           {
             printf 'Independent Stellar SCP consensus verification, %s.\n\n' "$TAG"
             printf '```toml\n'
-            printf 'ipsa-scp-verifier = "%s"\n' "$VERSION"
+            printf '%s = "%s"\n' "$CRATE" "$VERSION"
             printf '```\n\n'
-            printf '- [crates.io](https://crates.io/crates/ipsa-scp-verifier/%s)\n' "$VERSION"
-            printf '- [docs.rs](https://docs.rs/ipsa-scp-verifier/%s)\n\n' "$VERSION"
-            printf 'Published from %s after `just ci`: fmt, clippy over the workspace, the test suite, and `cargo audit`.\n' "$TAG"
+            printf -- '- [crates.io](https://crates.io/crates/%s/%s)\n' "$CRATE" "$VERSION"
+            printf -- '- [docs.rs](https://docs.rs/%s/%s)\n\n' "$CRATE" "$VERSION"
+            printf 'Published from %s after `just ci`: fmt, clippy, the test suite and `cargo audit`.\n' "$TAG"
           } > /tmp/notes.md
 
           if gh release view "$TAG" >/dev/null 2>&1; then

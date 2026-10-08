@@ -809,7 +809,7 @@ checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
 name = "ipsa-scp-verifier"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "clap",
@@ -1331,9 +1331,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stellar-consensus-verifier"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47635ac44720787812ea5a1012e7e7b358ea4f48866c4807da1007f684595390"
+checksum = "1426fb198b6ebbab87031f6ed9d790f85c6002bcc8bfc72467dde7ad4b0bbf3d"
 dependencies = [
  "ed25519-dalek",
  "sha2",
