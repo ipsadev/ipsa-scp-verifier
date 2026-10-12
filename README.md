@@ -77,3 +77,7 @@ and `--negative` flips one field at a time to confirm each step actually fails w
 | `stubs.cpp` | stands in for everything stellar-core links that the predicate does not need |
 | `Dockerfile`, `build-oracle.sh` | build it against a real stellar-core tree |
 | `oracle-docker` | wrapper so `CORE_ORACLE` can point at the container |
+
+## License
+
+Copyright 2026 Amanda Gonsalves. Licensed under the [Apache License 2.0](LICENSE).

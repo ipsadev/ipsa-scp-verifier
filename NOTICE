@@ -1,0 +1,9 @@
+ipsa-scp-verifier
+Copyright 2026 Amanda Gonsalves
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+The test oracle in core-oracle/ is compiled against stellar-core
+(https://github.com/stellar/stellar-core), Copyright Stellar Development
+Foundation and contributors, licensed under the Apache License, Version 2.0.
+It is not part of the published crate.
