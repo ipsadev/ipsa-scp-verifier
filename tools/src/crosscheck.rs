@@ -7,6 +7,9 @@ use base64::Engine as _;
 use ring::{digest, signature};
 
 const CHECKPOINT_FREQUENCY: u32 = 64;
+const MAX_QUORUM_SET_DEPTH: usize = 32;
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_GUNZIPPED_BYTES: u64 = 1024 * 1024 * 1024;
 const ENVELOPE_TYPE_SCP: [u8; 4] = [0, 0, 0, 1];
 
 const SCP_ST_EXTERNALIZE: i32 = 2;
@@ -111,7 +114,15 @@ impl<'a> Reader<'a> {
     }
 
     fn count(&mut self) -> Result<usize> {
-        Ok(self.u32()? as usize)
+        let count = self.u32()? as usize;
+        let remaining = self.buf.len() - self.pos;
+
+        ensure!(
+            count <= remaining / 4,
+            "a count of {count} cannot fit in the {remaining} bytes left"
+        );
+
+        Ok(count)
     }
 }
 
@@ -130,7 +141,29 @@ fn read_node_id(r: &mut Reader<'_>) -> Result<NodeId> {
     }
 }
 
-fn read_quorum_set(r: &mut Reader<'_>) -> Result<QuorumSet> {
+pub fn parse_quorum_set(raw: &[u8]) -> Result<QuorumSet> {
+    let mut reader = Reader::new(raw);
+    let quorum_set = read_quorum_set(&mut reader, 0)?;
+
+    ensure!(
+        reader.pos == raw.len(),
+        "{} trailing byte(s) after the quorum set",
+        raw.len() - reader.pos
+    );
+    ensure!(
+        quorum_set.threshold > 0,
+        "a trust root needs a threshold above zero"
+    );
+
+    Ok(quorum_set)
+}
+
+fn read_quorum_set(r: &mut Reader<'_>, depth: usize) -> Result<QuorumSet> {
+    ensure!(
+        depth <= MAX_QUORUM_SET_DEPTH,
+        "quorum sets nested deeper than {MAX_QUORUM_SET_DEPTH}"
+    );
+
     let start = r.pos;
     let threshold = r.u32()?;
 
@@ -143,7 +176,7 @@ fn read_quorum_set(r: &mut Reader<'_>) -> Result<QuorumSet> {
     let n = r.count()?;
     let mut inner = Vec::with_capacity(n);
     for _ in 0..n {
-        inner.push(read_quorum_set(r)?);
+        inner.push(read_quorum_set(r, depth + 1)?);
     }
 
     Ok(QuorumSet {
@@ -252,7 +285,7 @@ fn read_history_entry(record: &[u8]) -> Result<HistoryEntry> {
     let n = r.count()?;
     let mut quorum_sets = Vec::with_capacity(n);
     for _ in 0..n {
-        quorum_sets.push(read_quorum_set(&mut r)?);
+        quorum_sets.push(read_quorum_set(&mut r, 0)?);
     }
 
     let ledger_seq = r.u32()?;
@@ -306,7 +339,7 @@ fn read_header_entry(record: &[u8]) -> Result<HeaderEntry> {
     let bucket_list_hash = r.fixed32()?;
     let ledger_seq = r.u32()?;
 
-    ensure!(record.len() >= header_start + 4, "truncated header entry");
+    ensure!(record.len() >= r.pos + 4, "truncated header entry");
 
     Ok(HeaderEntry {
         entry_hash,
@@ -383,7 +416,7 @@ pub fn is_quorum(
 }
 
 pub fn checkpoint_for(ledger: u32) -> u32 {
-    ((ledger / CHECKPOINT_FREQUENCY) + 1) * CHECKPOINT_FREQUENCY - 1
+    ledger | (CHECKPOINT_FREQUENCY - 1)
 }
 
 fn fetch(base: &str, category: &str, checkpoint: u32) -> Result<Vec<u8>> {
@@ -396,21 +429,42 @@ fn fetch(base: &str, category: &str, checkpoint: u32) -> Result<Vec<u8>> {
     );
 
     let response = ureq::get(&url)
-        .set("User-Agent", "scp-chain-check/1.0")
+        .set(
+            "User-Agent",
+            concat!("ipsa-scp-verifier-tools/", env!("CARGO_PKG_VERSION")),
+        )
+        .timeout(std::time::Duration::from_secs(120))
         .call()
         .with_context(|| format!("GET {url}"))?;
 
     let mut gz = Vec::new();
-    response.into_reader().read_to_end(&mut gz)?;
+    response
+        .into_reader()
+        .take(MAX_DOWNLOAD_BYTES + 1)
+        .read_to_end(&mut gz)?;
+    ensure!(
+        gz.len() as u64 <= MAX_DOWNLOAD_BYTES,
+        "{url} is larger than {MAX_DOWNLOAD_BYTES} bytes"
+    );
 
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(&gz[..])
+        .take(MAX_GUNZIPPED_BYTES + 1)
         .read_to_end(&mut out)
         .with_context(|| format!("gunzip {url}"))?;
+    ensure!(
+        out.len() as u64 <= MAX_GUNZIPPED_BYTES,
+        "{url} expands past {MAX_GUNZIPPED_BYTES} bytes"
+    );
     Ok(out)
 }
 
-pub fn run(net: &Network, ledger: u32, export: Option<&Path>) -> Result<()> {
+pub fn run(
+    net: &Network,
+    ledger: u32,
+    trust_root: &QuorumSet,
+    export: Option<&Path>,
+) -> Result<()> {
     let network_id = sha256(net.passphrase.as_bytes());
     let checkpoint = checkpoint_for(ledger);
     println!("{} ledger {ledger} (checkpoint {checkpoint})", net.label);
@@ -447,13 +501,26 @@ pub fn run(net: &Network, ledger: u32, export: Option<&Path>) -> Result<()> {
     let mut signers: Vec<NodeId> = Vec::new();
     let mut qset_of: BTreeMap<NodeId, QuorumSet> = BTreeMap::new();
 
-    for env in &entry.envelopes {
-        let st = &env.statement;
-        ensure!(
-            st.kind == SCP_ST_EXTERNALIZE,
-            "not EXTERNALIZE: type {}",
-            st.kind
+    let externalize: Vec<&Envelope> = entry
+        .envelopes
+        .iter()
+        .filter(|env| env.statement.kind == SCP_ST_EXTERNALIZE)
+        .collect();
+
+    ensure!(
+        !externalize.is_empty(),
+        "no EXTERNALIZE envelopes for ledger {ledger}"
+    );
+
+    if externalize.len() < entry.envelopes.len() {
+        println!(
+            "  ignoring {} non-EXTERNALIZE envelope(s); only a decided value binds a ledger",
+            entry.envelopes.len() - externalize.len()
         );
+    }
+
+    for env in externalize {
+        let st = &env.statement;
         ensure!(st.slot == u64::from(ledger), "slot {} != {ledger}", st.slot);
 
         let mut preimage = Vec::with_capacity(32 + 4 + st.raw.len());
@@ -484,11 +551,10 @@ pub fn run(net: &Network, ledger: u32, export: Option<&Path>) -> Result<()> {
         "  [1] {} signatures verified over ENVELOPE_TYPE_SCP preimage",
         signers.len()
     );
-    println!("  [2] all statements are EXTERNALIZE for the requested slot");
+    println!("  [2] every kept statement is EXTERNALIZE for the requested slot");
     println!("  [3] all quorum-set preimages match their commitQuorumSetHash");
 
-    let first = *signers.first().context("no envelopes")?;
-    let local = qset_of.get(&first).context("no quorum set for signer")?;
+    let local = trust_root;
     let (ok, survivors) = is_quorum(local, &signers, &qset_of);
     ensure!(ok, "signer set is not a quorum");
     println!(

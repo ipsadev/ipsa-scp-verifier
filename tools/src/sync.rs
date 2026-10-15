@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
@@ -49,23 +50,26 @@ pub fn substitute(text: &str, rules: &[(&str, &str)]) -> String {
 }
 
 fn rustfmt(text: &str) -> Result<String> {
-    let dir = std::env::temp_dir().join(format!("tools-fmt-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("candidate.rs");
-    std::fs::write(&path, text)?;
-
-    let status = Command::new("rustfmt")
-        .args(["--edition", "2021", "--quiet"])
-        .arg(&path)
-        .status()
+    let mut child = Command::new("rustfmt")
+        .args(["--edition", "2021", "--quiet", "--emit", "stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
         .context("running rustfmt - is it installed?")?;
-    if !status.success() {
+
+    child
+        .stdin
+        .take()
+        .context("rustfmt has no stdin")?
+        .write_all(text.as_bytes())?;
+
+    let output = child.wait_with_output()?;
+
+    if !output.status.success() {
         bail!("rustfmt rejected the substituted source");
     }
 
-    let formatted = std::fs::read_to_string(&path)?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(formatted)
+    String::from_utf8(output.stdout).context("rustfmt wrote something other than UTF-8")
 }
 
 pub fn first_difference(expected: &str, actual: &str) -> Option<String> {
@@ -142,23 +146,7 @@ fn run(
     Ok(outcome)
 }
 
-pub fn verify(mode: Mode, root: &Path, target: Option<PathBuf>) -> Result<Outcome> {
-    let explicit = target.is_some();
-    let target = target.unwrap_or_else(|| root.join("../ipsa/cli/src/verify"));
-
-    if !explicit && !target.is_dir() {
-        eprintln!(
-            "no CLI copy at {} - the verifier is standalone only, so there is nothing to sync. \
-             pass --target to point at one.",
-            target.display()
-        );
-        return Ok(Outcome {
-            drifted: Vec::new(),
-            missing: Vec::new(),
-            written: Vec::new(),
-        });
-    }
-
+pub fn verify(mode: Mode, root: &Path, target: PathBuf) -> Result<Outcome> {
     run(
         mode,
         &root.join("src"),

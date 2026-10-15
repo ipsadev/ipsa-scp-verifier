@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 
 use crate::archive;
@@ -26,6 +26,7 @@ pub struct Totals {
     pub matched: usize,
     pub mismatched: Vec<u32>,
     pub absent: usize,
+    pub legacy: usize,
     pub sentinel: usize,
     pub unreadable: usize,
 }
@@ -74,7 +75,8 @@ pub async fn audit_checkpoint(checkpoint: u32, base: &str, totals: &mut Totals) 
                     totals.mismatched.push(header.ledger_seq);
                 }
             }
-            _ => totals.absent += 1,
+            Some(None) => totals.legacy += 1,
+            None => totals.absent += 1,
         }
     }
 
@@ -94,6 +96,10 @@ pub async fn run(options: &Options) -> Result<()> {
         .cloned()
         .unwrap_or_else(|| options.network.archive_base().to_string());
 
+    if options.archives.len() > 1 {
+        report::warn("--audit reads only the first --archive; the others are ignored");
+    }
+
     report::detail(&format!("archive: {base}"));
     let first = archive::checkpoint_for(options.from);
     let last = archive::checkpoint_for(options.to);
@@ -106,7 +112,10 @@ pub async fn run(options: &Options) -> Result<()> {
             Err(error) => report::warn(&format!("checkpoint {checkpoint}: {error:#}")),
         }
 
-        checkpoint = checkpoint.saturating_add(64);
+        match archive::next_checkpoint(checkpoint) {
+            Some(following) => checkpoint = following,
+            None => break,
+        }
     }
 
     report::banner("audit summary");
@@ -121,6 +130,14 @@ pub async fn run(options: &Options) -> Result<()> {
             "{} ledger(s) had no archived transaction set. A ledger with no transactions has no \
              transaction set, so this is expected rather than damage",
             totals.absent
+        ));
+    }
+
+    if totals.legacy > 0 {
+        report::detail(&format!(
+            "{} ledger(s) used a legacy transaction set, whose txSetHash is not a plain hash of \
+             the archived bytes, so they were not checked",
+            totals.legacy
         ));
     }
 
@@ -140,6 +157,10 @@ pub async fn run(options: &Options) -> Result<()> {
              txSetHash",
             totals.mismatched.len()
         ));
+
+        return Err(Error::AuditMismatches {
+            count: totals.mismatched.len(),
+        });
     }
 
     Ok(())

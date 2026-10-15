@@ -5,6 +5,9 @@ CORE=${CORE:-/src/stellar-core}
 OUT=${OUT:-/src/oracle}
 JOBS=${JOBS:-$(nproc)}
 
+BUILD=$(mktemp -d)
+trap 'rm -rf "$BUILD"' EXIT
+
 cd "$CORE"
 
 make -C lib/xdrpp -j"$JOBS"
@@ -27,20 +30,20 @@ CORE_FLAGS="-O2 -std=c++20 -pthread -DUSE_SPDLOG -DFMT_HEADER_ONLY=1 -DHAVE_CONF
   -isystem lib/libsodium/src/libsodium/include -isystem lib/spdlog/include \
   -isystem lib/tracy/public/tracy -isystem lib"
 
-clang++ -c $CORE_FLAGS -o /tmp/oracle.o /work/oracle.cpp
-clang++ -c $CORE_FLAGS -o /tmp/stubs.o /work/stubs.cpp
+clang++ -c $CORE_FLAGS -o "$BUILD"/oracle.o /work/oracle.cpp
+clang++ -c $CORE_FLAGS -o "$BUILD"/stubs.o /work/stubs.cpp
 clang++ -c -O2 -std=c++20 -pthread -DASIO_SEPARATE_COMPILATION=1 -DASIO_STANDALONE \
-  -isystem lib/asio/asio/include -o /tmp/asio.o lib/asio/asio/src/asio.cpp
-clang++ -c -O2 -std=c++20 -I . -isystem lib -o /tmp/jsoncpp.o lib/json/jsoncpp.cpp
-clang++ -c -O2 -std=c++20 -I . -isystem lib -isystem lib/util -o /tmp/crc16.o lib/util/crc16.cpp
-clang++ -c -O2 -std=c++20 -I . -isystem lib -isystem lib/util -o /tmp/siphash.o lib/util/siphash.cpp
+  -isystem lib/asio/asio/include -o "$BUILD"/asio.o lib/asio/asio/src/asio.cpp
+clang++ -c -O2 -std=c++20 -I . -isystem lib -o "$BUILD"/jsoncpp.o lib/json/jsoncpp.cpp
+clang++ -c -O2 -std=c++20 -I . -isystem lib -isystem lib/util -o "$BUILD"/crc16.o lib/util/crc16.cpp
+clang++ -c -O2 -std=c++20 -I . -isystem lib -isystem lib/util -o "$BUILD"/siphash.o lib/util/siphash.cpp
 for f in lib/spdlog/src/*.cpp; do
   clang++ -c -O2 -std=c++20 -DSPDLOG_COMPILED_LIB -DFMT_HEADER_ONLY=1 \
     -isystem lib/spdlog/include -isystem lib/fmt/include \
-    -o "/tmp/spdlog_$(basename "$f" .cpp).o" "$f"
+    -o "$BUILD/spdlog_$(basename "$f" .cpp).o" "$f"
 done
 
-clang++ -o "$OUT" /tmp/*.o src/scp/*.o src/crypto/*.o src/util/*.o \
+clang++ -o "$OUT" "$BUILD"/*.o src/scp/*.o src/crypto/*.o src/util/*.o \
   lib/xdrpp/xdrpp/libxdrpp.a lib/libsodium/src/libsodium/.libs/libsodium.a -lpthread
 
 "$OUT" </dev/null

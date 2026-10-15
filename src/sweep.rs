@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 
-use crate::archive::{self, checkpoint_for, CHECKPOINT_FREQUENCY};
-use crate::error::VerifyError;
+use crate::archive::{self, checkpoint_for, next_checkpoint, CHECKPOINT_FREQUENCY};
+use crate::error::{Verdict, VerifyError};
 use crate::history::{self, ArchivedEnvelope, HeaderHistoryEntry, ScpHistoryEntry};
 use crate::network::Network;
 use crate::report;
@@ -21,6 +21,7 @@ pub enum Outcome {
     IncompleteEvidence,
     SubQuorumEvidence,
     InsaneHistoricalQset,
+    InvalidEvidence,
     Disagreement,
 }
 
@@ -33,6 +34,7 @@ impl Outcome {
             Self::IncompleteEvidence => "incomplete-evidence",
             Self::SubQuorumEvidence => "sub-quorum-evidence",
             Self::InsaneHistoricalQset => "insane-historical-qset",
+            Self::InvalidEvidence => "invalid-evidence",
             Self::Disagreement => "disagreement",
         }
     }
@@ -48,6 +50,7 @@ impl Outcome {
                 Self::SubQuorumEvidence
             }
             VerifyError::QuorumSetPreimageMissing { .. } => Self::IncompleteEvidence,
+            other if other.verdict() == Verdict::InvalidEvidence => Self::InvalidEvidence,
             _ => Self::Disagreement,
         }
     }
@@ -77,46 +80,18 @@ pub struct Row {
 
 impl Row {
     fn to_json(&self) -> String {
-        let mut fields = vec![
-            format!("\"ledger\":{}", self.ledger),
-            format!("\"outcome\":\"{}\"", self.outcome.tag()),
-            format!("\"archives\":{}", self.archives),
-            format!("\"envelopes\":{}", self.envelopes),
-            format!("\"externalize\":{}", self.externalize),
-            format!("\"conflicts\":{}", self.conflicts),
-        ];
-
-        match self.protocol {
-            Some(value) => fields.push(format!("\"protocol\":{value}")),
-            None => fields.push("\"protocol\":null".to_string()),
-        }
-
-        match &self.reason {
-            Some(record) => fields.push(format!("\"reason\":{}", quote(record))),
-            None => fields.push("\"reason\":null".to_string()),
-        }
-
-        format!("{{{}}}", fields.join(","))
+        serde_json::json!({
+            "ledger": self.ledger,
+            "outcome": self.outcome.tag(),
+            "archives": self.archives,
+            "envelopes": self.envelopes,
+            "externalize": self.externalize,
+            "conflicts": self.conflicts,
+            "protocol": self.protocol,
+            "reason": self.reason,
+        })
+        .to_string()
     }
-}
-
-fn quote(text: &str) -> String {
-    let mut output = String::with_capacity(text.len() + 2);
-
-    output.push('"');
-
-    for character in text.chars() {
-        match character {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            '\n' => output.push_str("\\n"),
-            character if (character as u32) < 0x20 => output.push(' '),
-            character => output.push(character),
-        }
-    }
-
-    output.push('"');
-    output
 }
 
 pub struct MergedSlot {
@@ -344,7 +319,13 @@ fn row(ledger: u32, outcome: Outcome, reason: Option<String>) -> Row {
     }
 }
 
-async fn verify_one(ledger: u32, options: &Options, at: &Checkpoint, next: &Checkpoint) -> Row {
+async fn verify_one(
+    ledger: u32,
+    options: &Options,
+    config: &QuorumConfig,
+    at: &Checkpoint,
+    next: &Checkpoint,
+) -> Row {
     let Some(slot) = at.slots.get(&ledger) else {
         return row(
             ledger,
@@ -394,17 +375,7 @@ async fn verify_one(ledger: u32, options: &Options, at: &Checkpoint, next: &Chec
         trusted_previous_hash: at.parent_hash(ledger),
     };
 
-    let config = match trust_root(options, &input) {
-        Ok(c) => c,
-        Err(error) => {
-            out.outcome = Outcome::of(&error);
-            out.reason = Some(error.to_string());
-
-            return out;
-        }
-    };
-
-    let verified = match steps::verify_header(&input, &config) {
+    let verified = match steps::verify_ledger(&input, config) {
         Ok(v) => v,
         Err(error) => {
             out.outcome = Outcome::of(&error);
@@ -415,13 +386,6 @@ async fn verify_one(ledger: u32, options: &Options, at: &Checkpoint, next: &Chec
     };
 
     if options.results {
-        if input.result_pairs_xdr.is_empty() {
-            out.outcome = Outcome::IncompleteEvidence;
-            out.reason = Some("no transaction results archived for this ledger".into());
-
-            return out;
-        }
-
         if let Err(error) =
             steps::verify_result_set(&input.result_pairs_xdr, &verified.tx_set_result_hash)
         {
@@ -436,7 +400,13 @@ async fn verify_one(ledger: u32, options: &Options, at: &Checkpoint, next: &Chec
         return out;
     }
 
-    let following = ledger + 1;
+    let Some(following) = ledger.checked_add(1) else {
+        out.outcome = Outcome::IncompleteEvidence;
+        out.reason = Some("there is no slot after the last ledger sequence".into());
+
+        return out;
+    };
+
     let source = if checkpoint_for(following) == checkpoint_for(ledger) {
         at
     } else {
@@ -479,7 +449,7 @@ async fn verify_one(ledger: u32, options: &Options, at: &Checkpoint, next: &Chec
         trusted_previous_hash: None,
     };
 
-    let next_value = match externalized_value(&next_input, options) {
+    let next_value = match externalized_value(&next_input, config) {
         Ok(v) => v,
         Err(error) => {
             out.outcome = Outcome::of(&error);
@@ -500,7 +470,7 @@ async fn verify_one(ledger: u32, options: &Options, at: &Checkpoint, next: &Chec
 
 fn externalized_value(
     input: &HeaderInput,
-    options: &Options,
+    config: &QuorumConfig,
 ) -> core::result::Result<Vec<u8>, VerifyError> {
     let envelopes = input
         .envelopes_xdr
@@ -516,27 +486,9 @@ fn externalized_value(
 
     let preimages = steps::index_quorum_sets(&input.quorum_sets_xdr)?;
     let signers = steps::verify_quorum_set_hashes(&envelopes, &preimages)?;
-    let config = trust_root(options, input)?;
 
-    steps::verify_externalized_quorum(&config, &signers, &envelopes)
+    steps::verify_externalized_quorum(config, &signers, &envelopes)
         .map(|externalized| externalized.value)
-}
-
-fn trust_root(
-    options: &Options,
-    input: &HeaderInput,
-) -> core::result::Result<QuorumConfig, VerifyError> {
-    match &options.trust_root_xdr {
-        Some(raw) => QuorumConfig::from_xdr(raw),
-        None => {
-            let first = input
-                .quorum_sets_xdr
-                .first()
-                .ok_or(VerifyError::NoEnvelopes)?;
-
-            QuorumConfig::from_xdr(first)
-        }
-    }
 }
 
 pub struct ScanRow {
@@ -673,7 +625,10 @@ pub async fn scan(options: &Options) -> Result<()> {
             Err(error) => report::warn(&format!("checkpoint {checkpoint}: {error:#}")),
         }
 
-        checkpoint = checkpoint.saturating_add(64);
+        match next_checkpoint(checkpoint) {
+            Some(following) => checkpoint = following,
+            None => break,
+        }
     }
 
     report::banner("scan summary");
@@ -713,6 +668,13 @@ pub async fn sweep(options: &Options) -> Result<Vec<Row>> {
         });
     }
 
+    let config = QuorumConfig::from_xdr(
+        options
+            .trust_root_xdr
+            .as_deref()
+            .ok_or(Error::NoTrustRoot)?,
+    )?;
+
     report::banner(&format!(
         "sweep - {} ledgers {}..{}",
         options.network.label(),
@@ -736,7 +698,7 @@ pub async fn sweep(options: &Options) -> Result<Vec<Row>> {
     ));
     report::detail(&format!(
         "{} ledger(s) across {} checkpoint(s) of {CHECKPOINT_FREQUENCY}",
-        options.to - options.from + 1,
+        u64::from(options.to - options.from) + 1,
         checkpoint_for(options.to) / CHECKPOINT_FREQUENCY
             - checkpoint_for(options.from) / CHECKPOINT_FREQUENCY
             + 1
@@ -778,27 +740,30 @@ pub async fn sweep(options: &Options) -> Result<Vec<Row>> {
                     record(&mut rows, &mut sink, r)?;
                 }
 
-                ledger = checkpoint + 1;
+                match checkpoint.checked_add(1) {
+                    Some(following) => ledger = following,
+                    None => break,
+                }
+
                 continue;
             }
         };
 
         let last = options.to.min(checkpoint);
         let spans = options.next_slot && last == checkpoint;
-        let next = if spans {
-            match load_checkpoint(checkpoint + CHECKPOINT_FREQUENCY, options, true).await {
-                Ok(c) => Some(c),
+        let following_checkpoint = next_checkpoint(checkpoint).filter(|_| spans);
+        let next = match following_checkpoint {
+            Some(following) => match load_checkpoint(following, options, true).await {
+                Ok(c) => Some((following, c)),
                 Err(error) => {
                     report::warn(&format!(
-                        "checkpoint {} unavailable, so the last ledger of {checkpoint} cannot bind forward: {error:#}",
-                        checkpoint + CHECKPOINT_FREQUENCY
+                        "checkpoint {following} unavailable, so the last ledger of {checkpoint} cannot bind forward: {error:#}"
                     ));
 
                     None
                 }
-            }
-        } else {
-            None
+            },
+            None => None,
         };
 
         let empty = Checkpoint {
@@ -809,13 +774,18 @@ pub async fn sweep(options: &Options) -> Result<Vec<Row>> {
         };
 
         for seq in ledger..=last {
-            let r = verify_one(seq, options, &at, next.as_ref().unwrap_or(&empty)).await;
+            let following = next.as_ref().map_or(&empty, |(_, loaded)| loaded);
+            let r = verify_one(seq, options, &config, &at, following).await;
 
             record(&mut rows, &mut sink, r)?;
         }
 
-        cached = Some((checkpoint, at));
-        ledger = checkpoint + 1;
+        cached = next;
+
+        match checkpoint.checked_add(1) {
+            Some(following) => ledger = following,
+            None => break,
+        }
     }
 
     Ok(rows)
@@ -880,7 +850,9 @@ async fn take_checkpoint(
 ) -> Result<Checkpoint> {
     if let Some((have, _)) = cached {
         if *have == checkpoint {
-            return Ok(cached.take().expect("checked").1);
+            if let Some((_, loaded)) = cached.take() {
+                return Ok(loaded);
+            }
         }
     }
 

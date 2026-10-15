@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use ipsa_scp_verifier::error::Verdict;
 use ipsa_scp_verifier::evaluate::{apply_mutation, evaluate, NextSlot, MUTATIONS};
 use ipsa_scp_verifier::fixture::Fixture;
 use ipsa_scp_verifier::steps::{HeaderInput, QuorumConfig};
@@ -140,6 +141,7 @@ fn the_next_slot_step_passes_with_real_evidence() {
         &config,
         Some(NextSlot {
             envelopes_xdr: &next_envelopes,
+            quorum_sets_xdr: &input.quorum_sets_xdr,
             tx_set_xdr: &next_tx_set,
         }),
         None,
@@ -147,4 +149,79 @@ fn the_next_slot_step_passes_with_real_evidence() {
 
     let seven = report.steps.iter().find(|s| s.step == 7).unwrap();
     assert!(seven.passed, "step 7 failed: {:?}", seven.error);
+}
+
+#[test]
+fn the_wrong_statement_type_mutation_reaches_the_externalize_check() {
+    let (input, config, _, _) = load();
+    let mutated = apply_mutation("wrong-statement-type", &input).unwrap();
+    let report = run(&mutated.input, &config, Some("wrong-statement-type"));
+    let one = report.steps.iter().find(|s| s.step == 1).unwrap();
+    let error = one.error.as_deref().unwrap_or_default();
+
+    assert!(
+        error.contains("not EXTERNALIZE"),
+        "expected the statement-type check, got {error}"
+    );
+}
+
+#[test]
+fn a_bad_signature_is_invalid_evidence_not_a_contradiction() {
+    let (input, config, _, _) = load();
+    let mutated = apply_mutation("tampered-signature", &input).unwrap();
+    let report = run(&mutated.input, &config, Some("tampered-signature"));
+
+    assert_eq!(report.verdict, Verdict::InvalidEvidence);
+}
+
+#[tokio::test]
+async fn the_next_slot_is_checked_against_its_own_quorum_sets() {
+    use ipsa_scp_verifier::network::Network;
+    use ipsa_scp_verifier::sweep;
+
+    let archive = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/archive/testnet")
+        .display()
+        .to_string();
+    let options = sweep::Options {
+        network: Network::Testnet,
+        archives: vec![archive],
+        from: 4_289_984,
+        to: 4_289_984,
+        next_slot: false,
+        results: false,
+        trust_root_xdr: None,
+        jsonl: None,
+    };
+    let loaded = sweep::load_checkpoint(4_290_047, &options, false)
+        .await
+        .unwrap();
+    let slot = &loaded.slots[&4_289_984];
+    let following = &loaded.slots[&4_289_985];
+    let input = HeaderInput {
+        slot: 4_289_984,
+        network_id: Network::Testnet.id(),
+        ledger_header_xdr: loaded.headers[&4_289_984].header_xdr.clone(),
+        envelopes_xdr: slot.externalize_xdr.clone(),
+        quorum_sets_xdr: slot.quorum_sets_xdr.clone(),
+        ..HeaderInput::default()
+    };
+    let config = QuorumConfig::from_xdr(&slot.quorum_sets_xdr[0]).unwrap();
+    let report = evaluate(
+        &input,
+        &config,
+        Some(NextSlot {
+            envelopes_xdr: &following.externalize_xdr,
+            quorum_sets_xdr: &[],
+            tx_set_xdr: &[0u8; 4],
+        }),
+        None,
+    );
+    let seven = report.steps.iter().find(|s| s.step == 7).unwrap();
+    let error = seven.error.as_deref().unwrap_or_default();
+
+    assert!(
+        error.contains("no quorum-set preimage"),
+        "slot N+1 borrowed slot N's quorum sets: {error}"
+    );
 }

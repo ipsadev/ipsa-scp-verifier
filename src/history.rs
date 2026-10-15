@@ -30,10 +30,18 @@ fn statement_type_code(kind: ScpStatementType) -> i32 {
     }
 }
 
+pub const MAX_XDR_DEPTH: u32 = 500;
+
 type Reader<'a> = Limited<Cursor<&'a [u8]>>;
 
 fn reader(bytes: &[u8]) -> Reader<'_> {
-    Limited::new(Cursor::new(bytes), Limits::none())
+    Limited::new(
+        Cursor::new(bytes),
+        Limits {
+            depth: MAX_XDR_DEPTH,
+            len: bytes.len(),
+        },
+    )
 }
 
 fn position(reader: &Reader<'_>) -> usize {
@@ -89,7 +97,7 @@ pub fn read_scp_history_entry(record: &[u8]) -> Result<ScpHistoryEntry> {
 
     let quorum_set_count =
         u32::read_xdr(&mut entry).map_err(|error| Error::decoding("quorum set count", error))?;
-    let mut quorum_sets_xdr = Vec::with_capacity(quorum_set_count as usize);
+    let mut quorum_sets_xdr = Vec::new();
 
     for index in 0..quorum_set_count {
         let start = position(&entry);
@@ -103,7 +111,7 @@ pub fn read_scp_history_entry(record: &[u8]) -> Result<ScpHistoryEntry> {
         u32::read_xdr(&mut entry).map_err(|error| Error::decoding("ledgerSeq", error))?;
     let n_envelopes =
         u32::read_xdr(&mut entry).map_err(|error| Error::decoding("envelope count", error))?;
-    let mut envelopes = Vec::with_capacity(n_envelopes as usize);
+    let mut envelopes = Vec::new();
 
     for index in 0..n_envelopes {
         let envelope_start = position(&entry);
@@ -206,7 +214,7 @@ pub fn read_result_record(record: &[u8]) -> Result<ResultRecord> {
         u32::read_xdr(&mut result).map_err(|error| Error::decoding("ledgerSeq", error))?;
     let n =
         u32::read_xdr(&mut result).map_err(|error| Error::decoding("result pair count", error))?;
-    let mut result_pairs = Vec::with_capacity(n as usize);
+    let mut result_pairs = Vec::new();
 
     for index in 0..n {
         let start = position(&result);

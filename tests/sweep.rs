@@ -1,4 +1,6 @@
-use ipsa_scp_verifier::history::{ArchivedEnvelope, ScpHistoryEntry};
+use ipsa_scp_verifier::archive;
+use ipsa_scp_verifier::error::Error;
+use ipsa_scp_verifier::history::{self, ArchivedEnvelope, ScpHistoryEntry};
 use ipsa_scp_verifier::network::Network;
 use ipsa_scp_verifier::sweep::{merge_slot, sweep, Options, Outcome};
 
@@ -12,6 +14,16 @@ fn archive_dir() -> String {
         .to_string()
 }
 
+fn testnet_trust_root() -> Vec<u8> {
+    let path = archive::local_path(&archive_dir(), &archive::relative_path("scp", CHECKPOINT));
+    let gzipped = std::fs::read(path).expect("the mirrored scp file reads");
+    let raw = archive::gunzip(&gzipped, archive::MAX_GUNZIPPED_BYTES).expect("it gunzips");
+    let frames = archive::frames(&raw).expect("it frames");
+    let entry = history::read_scp_history_entry(frames[0]).expect("the first entry decodes");
+
+    entry.quorum_sets_xdr[0].clone()
+}
+
 fn options(from: u32, to: u32) -> Options {
     Options {
         network: Network::Testnet,
@@ -20,9 +32,18 @@ fn options(from: u32, to: u32) -> Options {
         to,
         next_slot: false,
         results: false,
-        trust_root_xdr: None,
+        trust_root_xdr: Some(testnet_trust_root()),
         jsonl: None,
     }
+}
+
+#[tokio::test]
+async fn a_sweep_without_a_trust_root_is_refused() {
+    let mut options = options(FIRST, CHECKPOINT);
+
+    options.trust_root_xdr = None;
+
+    assert!(matches!(sweep(&options).await, Err(Error::NoTrustRoot)));
 }
 
 #[tokio::test]

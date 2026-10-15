@@ -2,6 +2,7 @@
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,10 @@ using namespace stellar;
 static std::vector<uint8_t>
 unhex(std::string const& text)
 {
+    if (text.size() % 2 != 0)
+    {
+        throw std::invalid_argument("hex input has an odd number of digits");
+    }
     std::vector<uint8_t> out;
     out.reserve(text.size() / 2);
     for (size_t i = 0; i + 1 < text.size(); i += 2)

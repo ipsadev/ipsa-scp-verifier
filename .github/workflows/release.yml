@@ -28,42 +28,59 @@ env:
   TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
 
 jobs:
-  release:
-    name: gate, publish, announce
+  gate:
+    name: gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      crate: ${{ steps.version.outputs.crate }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+      published: ${{ steps.published.outputs.published }}
     steps:
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.TAG || github.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: the tag must match the crate version
+        id: version
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           crate="$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          echo "CRATE=$crate" >> "$GITHUB_ENV"
-          if [ -z "$TAG" ]; then
+          tag="$TAG"
+          if [ -z "$tag" ]; then
             if [ "$DRY_RUN" != "true" ]; then
               echo "::error::a release needs a tag; to rehearse without one, run with dry_run"
               exit 1
             fi
-            echo "TAG=v$version" >> "$GITHUB_ENV"
+            tag="v$version"
             echo "::notice::rehearsing v$version from $GITHUB_REF_NAME, no tag needed"
-          elif [ "$TAG" != "v$version" ]; then
-            echo "::error::tag $TAG does not match Cargo.toml version $version"
+          elif [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $version"
             exit 1
           else
-            echo "tag $TAG matches crate version $version"
+            echo "tag $tag matches crate version $version"
           fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          {
+            echo "crate=$crate"
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: the version must not already be on crates.io, unless it came from this commit
+        id: published
+        env:
+          CRATE: ${{ steps.version.outputs.crate }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           body="$(curl -sS --max-time 30 \
             -H 'User-Agent: ipsadev-release (github actions)' \
@@ -71,15 +88,16 @@ jobs:
 
           if ! printf '%s' "$body" | grep -q '"version"'; then
             echo "$VERSION is not published yet"
+            echo "published=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           curl -sSfL --max-time 60 \
             -H 'User-Agent: ipsadev-release (github actions)' \
-            -o /tmp/published.crate \
+            -o "$RUNNER_TEMP/published.crate" \
             "https://static.crates.io/crates/$CRATE/$CRATE-$VERSION.crate"
 
-          published="$(tar -xzOf /tmp/published.crate "$CRATE-$VERSION/.cargo_vcs_info.json" \
+          published="$(tar -xzOf "$RUNNER_TEMP/published.crate" "$CRATE-$VERSION/.cargo_vcs_info.json" \
             | sed -n 's/.*"sha1": *"\([0-9a-f]*\)".*/\1/p')"
           commit="$(git rev-parse HEAD)"
 
@@ -88,29 +106,22 @@ jobs:
             exit 1
           fi
 
-          echo "PUBLISHED=true" >> "$GITHUB_ENV"
+          echo "published=true" >> "$GITHUB_OUTPUT"
           echo "::notice::$CRATE $VERSION is already published from this commit; announcing it without publishing again"
 
       - name: setup rust
-        uses: dtolnay/rust-toolchain@1.91.1
+        uses: dtolnay/rust-toolchain@67b7c9de7d66c881487796e401478f3cb00704b0
         with:
+          toolchain: 1.91.1
           components: rustfmt, clippy
 
       - name: cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       - name: setup just
-        uses: extractions/setup-just@v3
-
-      - name: cache cargo-audit binary
-        id: cache-cargo-audit
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-latest-1
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b
 
       - name: install cargo-audit
-        if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
         run: cargo install cargo-audit --locked
 
       - name: just ci
@@ -119,33 +130,61 @@ jobs:
       - name: package, and compile what crates.io would receive
         run: just package
 
-      - name: publish, for real this time
-        if: ${{ github.event.inputs.dry_run != 'true' && env.PUBLISHED != 'true' }}
+  publish:
+    name: publish
+    needs: gate
+    if: ${{ github.event.inputs.dry_run != 'true' && needs.gate.outputs.published != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+          persist-credentials: false
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@67b7c9de7d66c881487796e401478f3cb00704b0
+        with:
+          toolchain: 1.91.1
+
+      - name: publish what the gate already compiled
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
+        run: cargo publish --locked --no-verify
 
-      - name: say what a dry run skipped
-        if: ${{ github.event.inputs.dry_run == 'true' }}
-        run: echo "::notice::dry run - every gate passed, nothing was published"
-
+  announce:
+    name: announce
+    needs: [gate, publish]
+    if: ${{ always() && github.event.inputs.dry_run != 'true' && needs.gate.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
       - name: announce the release
-        if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          CRATE: ${{ needs.gate.outputs.crate }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          RELEASE_TAG: ${{ needs.gate.outputs.tag }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
         run: |
           {
-            printf 'Independent Stellar SCP consensus verification, %s.\n\n' "$TAG"
+            printf 'Independent Stellar SCP consensus verification, %s.\n\n' "$RELEASE_TAG"
             printf '```toml\n'
             printf '%s = "%s"\n' "$CRATE" "$VERSION"
             printf '```\n\n'
             printf -- '- [crates.io](https://crates.io/crates/%s/%s)\n' "$CRATE" "$VERSION"
             printf -- '- [docs.rs](https://docs.rs/%s/%s)\n\n' "$CRATE" "$VERSION"
-            printf 'Published from %s after `just ci`: fmt, clippy, the test suite and `cargo audit`.\n' "$TAG"
-          } > /tmp/notes.md
+            printf 'Published from %s after `just ci`: fmt, clippy, the test suite and `cargo audit`.\n' "$RELEASE_TAG"
+          } > "$RUNNER_TEMP/notes.md"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file /tmp/notes.md
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$COMMIT" \
+              --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/notes.md"
           fi

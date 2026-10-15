@@ -3,7 +3,7 @@ use crate::scp::envelope::{Ballot, Envelope, Externalize, Statement};
 use crate::error::VerifyError;
 use crate::steps::{
     authenticate_evidence, index_quorum_sets, validate_externalize, verify_externalized_quorum,
-    verify_externalized_value, verify_header, verify_ledger_hash, verify_next_slot_binding,
+    verify_externalized_value, verify_ledger, verify_ledger_hash, verify_next_slot_binding,
     verify_quorum_set_hashes, verify_result_set, verify_scp_header, HeaderInput, QuorumConfig,
 };
 
@@ -23,9 +23,16 @@ pub enum Outcome {
     Rejected(String),
     WrongError(String),
     Accepted,
+    Skipped(String),
 }
 
 const STATEMENT_TYPE_OFFSET: usize = 44;
+
+const VALUE_LENGTH_OFFSET: usize = STATEMENT_TYPE_OFFSET + 8;
+
+const SCP_VALUE_OFFSET: usize = 75;
+
+type Prepared = Result<Result<(), VerifyError>, String>;
 
 fn resolve_quorum_sets(
     input: &HeaderInput,
@@ -41,15 +48,30 @@ fn resolve_quorum_sets(
     verify_quorum_set_hashes(&envelopes, &preimages)
 }
 
-fn as_confirm(envelope_xdr: &[u8]) -> Vec<u8> {
-    let value_offset = STATEMENT_TYPE_OFFSET + 8;
-    let value_len = u32::from_be_bytes(
-        envelope_xdr[value_offset..value_offset + 4]
-            .try_into()
-            .expect("four bytes"),
-    ) as usize;
-    let padded = value_len + (4 - (value_len % 4)) % 4;
-    let highest_offset = value_offset + 4 + padded;
+fn too_short(what: &str) -> String {
+    format!("{what} is too short for this mutation")
+}
+
+fn highest_confirmed_offset(envelope_xdr: &[u8]) -> Result<usize, String> {
+    let length = envelope_xdr
+        .get(VALUE_LENGTH_OFFSET..VALUE_LENGTH_OFFSET + 4)
+        .ok_or_else(|| too_short("the first envelope"))?;
+    let value_length = u32::from_be_bytes([length[0], length[1], length[2], length[3]]) as usize;
+    let padded = value_length
+        .checked_add((4 - (value_length % 4)) % 4)
+        .ok_or_else(|| too_short("the first envelope"))?;
+    let offset = (VALUE_LENGTH_OFFSET + 4)
+        .checked_add(padded)
+        .ok_or_else(|| too_short("the first envelope"))?;
+
+    match envelope_xdr.len() >= offset + 4 {
+        true => Ok(offset),
+        false => Err(too_short("the first envelope")),
+    }
+}
+
+fn as_confirm(envelope_xdr: &[u8]) -> Result<Vec<u8>, String> {
+    let highest_offset = highest_confirmed_offset(envelope_xdr)?;
     let mut out = envelope_xdr[..STATEMENT_TYPE_OFFSET].to_vec();
 
     out.extend_from_slice(&1u32.to_be_bytes());
@@ -59,7 +81,38 @@ fn as_confirm(envelope_xdr: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&1u32.to_be_bytes());
     out.extend_from_slice(&envelope_xdr[highest_offset + 4..]);
 
-    out
+    Ok(out)
+}
+
+fn first_envelope(input: &HeaderInput) -> Result<&Vec<u8>, String> {
+    input
+        .envelopes_xdr
+        .first()
+        .ok_or_else(|| "there are no envelopes to mutate".to_string())
+}
+
+fn with_first_envelope(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    mutate: impl FnOnce(&mut Vec<u8>) -> Result<(), String>,
+) -> Prepared {
+    let mut bad = input.clone();
+    let first = bad
+        .envelopes_xdr
+        .first_mut()
+        .ok_or_else(|| "there are no envelopes to mutate".to_string())?;
+
+    mutate(first)?;
+
+    Ok(verify_ledger(&bad, config).map(|_| ()))
+}
+
+fn flip_at(bytes: &mut [u8], offset: usize) -> Result<(), String> {
+    let byte = bytes.get_mut(offset).ok_or_else(|| too_short("the item"))?;
+
+    *byte ^= 0x01;
+
+    Ok(())
 }
 
 fn flip_last(bytes: &mut [u8]) {
@@ -75,10 +128,21 @@ fn check(
     result: Result<(), VerifyError>,
     matches: impl Fn(&VerifyError) -> bool,
 ) -> Case {
+    prepared(name, step, expected, Ok(result), matches)
+}
+
+fn prepared(
+    name: &'static str,
+    step: &'static str,
+    expected: &'static str,
+    result: Prepared,
+    matches: impl Fn(&VerifyError) -> bool,
+) -> Case {
     let outcome = match result {
-        Ok(()) => Outcome::Accepted,
-        Err(error) if matches(&error) => Outcome::Rejected(error.to_string()),
-        Err(error) => Outcome::WrongError(error.to_string()),
+        Err(reason) => Outcome::Skipped(reason),
+        Ok(Ok(())) => Outcome::Accepted,
+        Ok(Err(error)) if matches(&error) => Outcome::Rejected(error.to_string()),
+        Ok(Err(error)) => Outcome::WrongError(error.to_string()),
     };
 
     Case {
@@ -96,16 +160,15 @@ pub fn run_suite(
 ) -> Vec<Case> {
     let mut cases = Vec::new();
 
-    cases.push(check(
+    cases.push(prepared(
         "tampered signature",
         "envelope signatures",
         "InvalidSignature",
-        {
-            let mut bad = input.clone();
+        with_first_envelope(input, config, |first| {
+            flip_last(first);
 
-            flip_last(&mut bad.envelopes_xdr[0]);
-            verify_header(&bad, config).map(|_| ())
-        },
+            Ok(())
+        }),
         |error| matches!(error, VerifyError::InvalidSignature { .. }),
     ));
     cases.push(check(
@@ -116,47 +179,37 @@ pub fn run_suite(
             let mut bad = input.clone();
 
             bad.network_id[0] ^= 0x01;
-            verify_header(&bad, config).map(|_| ())
+            verify_ledger(&bad, config).map(|_| ())
         },
         |error| matches!(error, VerifyError::InvalidSignature { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "tampered statement (ballot counter)",
         "statement validation",
         "InsaneStatement",
-        {
-            let mut bad = input.clone();
-            let statement_offset = STATEMENT_TYPE_OFFSET + 4;
-
-            bad.envelopes_xdr[0][statement_offset] ^= 0x01;
-            verify_header(&bad, config).map(|_| ())
-        },
+        with_first_envelope(input, config, |first| {
+            flip_at(first, STATEMENT_TYPE_OFFSET + 4)
+        }),
         |error| matches!(error, VerifyError::InsaneStatement { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "tampered statement (highest confirmed ballot counter)",
         "envelope signatures",
         "InvalidSignature",
-        {
-            let mut bad = input.clone();
-            let value_offset = STATEMENT_TYPE_OFFSET + 8;
-            let value_len = u32::from_be_bytes(
-                bad.envelopes_xdr[0][value_offset..value_offset + 4]
-                    .try_into()
-                    .expect("four bytes"),
-            ) as usize;
-            let highest_offset = value_offset + 4 + value_len;
+        with_first_envelope(input, config, |first| {
+            let offset = highest_confirmed_offset(first)?;
 
-            bad.envelopes_xdr[0][highest_offset] ^= 0x01;
-            verify_header(&bad, config).map(|_| ())
-        },
+            flip_at(first, offset)
+        }),
         |error| matches!(error, VerifyError::InvalidSignature { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "non-EXTERNALIZE statement",
         "statement validation",
         "NotExternalize",
-        validate_externalize(&as_confirm(&input.envelopes_xdr[0]), input.slot).map(|_| ()),
+        first_envelope(input)
+            .and_then(|first| as_confirm(first))
+            .map(|confirm| validate_externalize(&confirm, input.slot).map(|_| ())),
         |error| matches!(error, VerifyError::NotExternalize { .. }),
     ));
     cases.push(check(
@@ -166,22 +219,21 @@ pub fn run_suite(
         {
             let mut bad = input.clone();
 
-            bad.slot += 1;
-            verify_header(&bad, config).map(|_| ())
+            bad.slot = bad.slot.wrapping_add(1);
+            verify_ledger(&bad, config).map(|_| ())
         },
         |error| matches!(error, VerifyError::SlotMismatch { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "duplicate signer",
         "statement validation",
         "DuplicateSigner",
-        {
+        first_envelope(input).map(|first| {
             let mut bad = input.clone();
-            let first = bad.envelopes_xdr[0].clone();
 
-            bad.envelopes_xdr.push(first);
-            verify_header(&bad, config).map(|_| ())
-        },
+            bad.envelopes_xdr.push(first.clone());
+            verify_ledger(&bad, config).map(|_| ())
+        }),
         |error| matches!(error, VerifyError::DuplicateSigner { .. }),
     ));
     cases.push(check(
@@ -198,17 +250,21 @@ pub fn run_suite(
         resolve_quorum_sets(input, &[minimal_quorum_set_xdr(&[0x11u8; 32])]).map(|_| ()),
         |error| matches!(error, VerifyError::QuorumSetPreimageMissing { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "a forged CONFIRM statement",
         "envelope signatures",
         "InvalidSignature",
-        authenticate_evidence(
-            &input.network_id,
-            input.slot,
-            &[as_confirm(&input.envelopes_xdr[0])],
-            &input.quorum_sets_xdr,
-        )
-        .map(|_| ()),
+        first_envelope(input)
+            .and_then(|first| as_confirm(first))
+            .map(|confirm| {
+                authenticate_evidence(
+                    &input.network_id,
+                    input.slot,
+                    &[confirm],
+                    &input.quorum_sets_xdr,
+                )
+                .map(|_| ())
+            }),
         |error| matches!(error, VerifyError::InvalidSignature { .. }),
     ));
     cases.push(check(
@@ -230,16 +286,13 @@ pub fn run_suite(
         },
         |error| matches!(error, VerifyError::InsaneQuorumSet { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "signers outside the configured trust root",
         "quorum check",
         "InsufficientQuorum",
-        {
-            let stranger = QuorumConfig::from_xdr(&three_of_three_strangers())
-                .expect("stranger trust root is sane");
-
-            verify_header(input, &stranger).map(|_| ())
-        },
+        QuorumConfig::from_xdr(&three_of_three_strangers())
+            .map_err(|error| format!("building a stranger trust root: {error}"))
+            .map(|stranger| verify_ledger(input, &stranger).map(|_| ())),
         |error| matches!(error, VerifyError::InsufficientQuorum { .. }),
     ));
     cases.push(check(
@@ -250,7 +303,7 @@ pub fn run_suite(
             let mut bad = input.clone();
 
             bad.envelopes_xdr.truncate(1);
-            verify_header(&bad, config).map(|_| ())
+            verify_ledger(&bad, config).map(|_| ())
         },
         |error| matches!(error, VerifyError::InsufficientQuorum { .. }),
     ));
@@ -262,7 +315,7 @@ pub fn run_suite(
             let mut bad = input.clone();
 
             bad.envelopes_xdr.clear();
-            verify_header(&bad, config).map(|_| ())
+            verify_ledger(&bad, config).map(|_| ())
         },
         |error| matches!(error, VerifyError::NoEnvelopes),
     ));
@@ -284,15 +337,15 @@ pub fn run_suite(
         no_value_is_quorum_backed(input, config),
         |error| matches!(error, VerifyError::InsufficientQuorum { .. }),
     ));
-    cases.push(check(
+    cases.push(prepared(
         "commit.value != header.scpValue",
         "ledger binding",
         "ValueNotInHeader",
         {
             let mut bad = input.clone();
 
-            bad.ledger_header_xdr[75] ^= 0x01;
-            verify_header(&bad, config).map(|_| ())
+            flip_at(&mut bad.ledger_header_xdr, SCP_VALUE_OFFSET)
+                .map(|()| verify_ledger(&bad, config).map(|_| ()))
         },
         |error| matches!(error, VerifyError::ValueNotInHeader { .. }),
     ));
@@ -300,7 +353,7 @@ pub fn run_suite(
         "header for another ledger",
         "ledger binding",
         "LedgerSeqMismatch",
-        verify_scp_header(&input.ledger_header_xdr, input.slot + 1, &[]).map(|_| ()),
+        verify_scp_header(&input.ledger_header_xdr, input.slot.wrapping_add(1), &[]).map(|_| ()),
         |error| matches!(error, VerifyError::LedgerSeqMismatch { .. }),
     ));
     cases.push(check(
@@ -311,7 +364,7 @@ pub fn run_suite(
             let mut bad = input.clone();
 
             bad.ledger_header_xdr.truncate(40);
-            verify_header(&bad, config).map(|_| ())
+            verify_ledger(&bad, config).map(|_| ())
         },
         |error| matches!(error, VerifyError::MalformedXdr { .. }),
     ));
@@ -323,7 +376,7 @@ pub fn run_suite(
             let mut bad = input.clone();
 
             bad.trusted_previous_hash = Some([0xffu8; 32]);
-            verify_header(&bad, config).map(|_| ())
+            verify_ledger(&bad, config).map(|_| ())
         },
         |error| matches!(error, VerifyError::PreviousLedgerMismatch { .. }),
     ));
@@ -344,7 +397,7 @@ fn result_set_cases(input: &HeaderInput, config: &QuorumConfig) -> Vec<Case> {
         return Vec::new();
     }
 
-    let Ok(verified) = verify_header(input, config) else {
+    let Ok(verified) = verify_ledger(input, config) else {
         return Vec::new();
     };
 
@@ -403,7 +456,7 @@ fn next_slot_cases(input: &HeaderInput, next: Option<NextSlotEvidence<'_>>) -> V
     let decoded = next
         .envelopes_xdr
         .iter()
-        .map(|raw| validate_externalize(raw, input.slot + 1))
+        .map(|raw| validate_externalize(raw, input.slot.wrapping_add(1)))
         .collect::<Result<Vec<_>, _>>();
     let Ok(envelopes) = decoded else {
         return Vec::new();

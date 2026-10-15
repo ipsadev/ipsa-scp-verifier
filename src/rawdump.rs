@@ -1,3 +1,4 @@
+use crate::history;
 use crate::report;
 use crate::strkey;
 
@@ -23,19 +24,16 @@ impl<'a> Cursor<'a> {
     }
 
     fn u32(&mut self) -> Option<(usize, u32)> {
-        let (statement_offset, b) = self.take(4)?;
+        let (offset, b) = self.take(4)?;
 
-        Some((
-            statement_offset,
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-        ))
+        Some((offset, u32::from_be_bytes([b[0], b[1], b[2], b[3]])))
     }
 
     fn u64(&mut self) -> Option<(usize, u64)> {
-        let (statement_offset, b) = self.take(8)?;
+        let (offset, b) = self.take(8)?;
 
         Some((
-            statement_offset,
+            offset,
             u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
         ))
     }
@@ -89,64 +87,80 @@ fn padded(length: usize) -> usize {
     length.div_ceil(4) * 4
 }
 
+fn key_type_name(kind: u32) -> &'static str {
+    match kind {
+        0 => "ED25519",
+        _ => "UNKNOWN",
+    }
+}
+
 pub fn envelope(xdr: &[u8], full: bool) {
     header_row();
     let mut cursor = Cursor::new(xdr);
     let mut walk = || -> Option<()> {
-        let (statement_offset, kind) = cursor.u32()?;
+        let (offset, kind) = cursor.u32()?;
 
         scalar(
-            statement_offset,
+            offset,
             4,
             "PublicKey type",
-            format!("{kind} (ED25519)"),
+            format!("{kind} ({})", key_type_name(kind)),
         );
-        let (statement_offset, key) = cursor.take(32)?;
+
+        if kind != 0 {
+            return None;
+        }
+
+        let (offset, key) = cursor.take(32)?;
         let node_id: [u8; 32] = key.try_into().ok()?;
 
         field(
-            statement_offset,
+            offset,
             32,
             "nodeID",
             &format!("{}  {}", hex::encode(key), strkey::account_id(&node_id)),
         );
-        let (statement_offset, slot) = cursor.u64()?;
+        let (offset, slot) = cursor.u64()?;
 
-        scalar(statement_offset, 8, "slotIndex", slot);
-        let (statement_offset, st) = cursor.u32()?;
+        scalar(offset, 8, "slotIndex", slot);
+        let (offset, st) = cursor.u32()?;
+
+        let statement_type = i32::try_from(st).unwrap_or(-1);
 
         scalar(
-            statement_offset,
+            offset,
             4,
             "SCPStatementType",
-            format!("{st} (EXTERNALIZE)"),
+            format!("{st} ({})", history::statement_type_name(statement_type)),
         );
-        let (statement_offset, counter) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "commit.counter", counter);
-        let (statement_offset, n) = cursor.u32()?;
+        if statement_type != history::SCP_ST_EXTERNALIZE {
+            report::detail("only an EXTERNALIZE body is walked field by field");
 
-        scalar(statement_offset, 4, "commit.value length", n);
-        let (statement_offset, value) = cursor.take(padded(n as usize))?;
+            return None;
+        }
 
-        field(
-            statement_offset,
-            value.len(),
-            "commit.value",
-            &shown(value, 40, full),
-        );
-        let (statement_offset, n_h) = cursor.u32()?;
+        let (offset, counter) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "nH", n_h);
-        let (statement_offset, qhash) = cursor.take(32)?;
+        scalar(offset, 4, "commit.counter", counter);
+        let (offset, n) = cursor.u32()?;
 
-        bytes_field(statement_offset, "commitQuorumSetHash", qhash);
-        let (statement_offset, siglen) = cursor.u32()?;
+        scalar(offset, 4, "commit.value length", n);
+        let (offset, value) = cursor.take(padded(n as usize))?;
 
-        scalar(statement_offset, 4, "signature length", siglen);
-        let (statement_offset, sig) = cursor.take(siglen as usize)?;
+        field(offset, value.len(), "commit.value", &shown(value, 40, full));
+        let (offset, n_h) = cursor.u32()?;
 
-        bytes_field(statement_offset, "signature", sig);
+        scalar(offset, 4, "nH", n_h);
+        let (offset, qhash) = cursor.take(32)?;
+
+        bytes_field(offset, "commitQuorumSetHash", qhash);
+        let (offset, siglen) = cursor.u32()?;
+
+        scalar(offset, 4, "signature length", siglen);
+        let (offset, sig) = cursor.take(siglen as usize)?;
+
+        bytes_field(offset, "signature", sig);
 
         Some(())
     };
@@ -169,46 +183,31 @@ pub fn quorum_set(xdr: &[u8]) {
 
 fn walk_quorum_set(cursor: &mut Cursor<'_>, depth: usize) -> Option<()> {
     let padding = "  ".repeat(depth);
-    let (statement_offset, threshold) = cursor.u32()?;
+    let (offset, threshold) = cursor.u32()?;
 
-    scalar(
-        statement_offset,
-        4,
-        &format!("{padding}threshold"),
-        threshold,
-    );
-    let (statement_offset, n) = cursor.u32()?;
+    scalar(offset, 4, &format!("{padding}threshold"), threshold);
+    let (offset, n) = cursor.u32()?;
 
-    scalar(statement_offset, 4, &format!("{padding}validators.len"), n);
+    scalar(offset, 4, &format!("{padding}validators.len"), n);
 
     for index in 0..n {
-        let (statement_offset, kind) = cursor.u32()?;
+        let (offset, kind) = cursor.u32()?;
 
-        scalar(
-            statement_offset,
-            4,
-            &format!("{padding}  [{index}] key type"),
-            kind,
-        );
-        let (statement_offset, key) = cursor.take(32)?;
+        scalar(offset, 4, &format!("{padding}  [{index}] key type"), kind);
+        let (offset, key) = cursor.take(32)?;
         let node_id: [u8; 32] = key.try_into().ok()?;
 
         field(
-            statement_offset,
+            offset,
             32,
             &format!("{padding}  [{index}] validator"),
             &format!("{}  {}", hex::encode(key), strkey::account_id(&node_id)),
         );
     }
 
-    let (statement_offset, n_inner) = cursor.u32()?;
+    let (offset, n_inner) = cursor.u32()?;
 
-    scalar(
-        statement_offset,
-        4,
-        &format!("{padding}innerSets.len"),
-        n_inner,
-    );
+    scalar(offset, 4, &format!("{padding}innerSets.len"), n_inner);
 
     for _ in 0..n_inner {
         walk_quorum_set(cursor, depth + 1)?;
@@ -221,61 +220,67 @@ pub fn ledger_header(xdr: &[u8]) {
     header_row();
     let mut cursor = Cursor::new(xdr);
     let mut walk = || -> Option<()> {
-        let (statement_offset, version) = cursor.u32()?;
+        let (offset, version) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "ledgerVersion", version);
-        let (statement_offset, prev) = cursor.take(32)?;
+        scalar(offset, 4, "ledgerVersion", version);
+        let (offset, prev) = cursor.take(32)?;
 
-        bytes_field(statement_offset, "previousLedgerHash", prev);
-        let sv_start = statement_offset + 32;
-        let (statement_offset, tx_set_hash) = cursor.take(32)?;
+        bytes_field(offset, "previousLedgerHash", prev);
+        let sv_start = offset + 32;
+        let (offset, tx_set_hash) = cursor.take(32)?;
 
-        bytes_field(statement_offset, "scpValue.txSetHash", tx_set_hash);
-        let (statement_offset, close_time) = cursor.u64()?;
+        bytes_field(offset, "scpValue.txSetHash", tx_set_hash);
+        let (offset, close_time) = cursor.u64()?;
 
-        scalar(statement_offset, 8, "scpValue.closeTime", close_time);
-        let (statement_offset, n_up) = cursor.u32()?;
+        scalar(offset, 8, "scpValue.closeTime", close_time);
+        let (offset, n_up) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "scpValue.upgrades.len", n_up);
+        scalar(offset, 4, "scpValue.upgrades.len", n_up);
 
         for index in 0..n_up {
-            let (statement_offset, len) = cursor.u32()?;
+            let (offset, len) = cursor.u32()?;
 
-            scalar(
-                statement_offset,
-                4,
-                &format!("  upgrade[{index}] length"),
-                len,
-            );
-            let (statement_offset, raw) = cursor.take(padded(len as usize))?;
+            scalar(offset, 4, &format!("  upgrade[{index}] length"), len);
+            let (offset, raw) = cursor.take(padded(len as usize))?;
 
             field(
-                statement_offset,
+                offset,
                 raw.len(),
                 &format!("  upgrade[{index}]"),
                 &hex::encode(raw),
             );
         }
 
-        let (statement_offset, ext) = cursor.u32()?;
+        let (offset, ext) = cursor.u32()?;
 
         scalar(
-            statement_offset,
+            offset,
             4,
             "scpValue.ext",
-            format!("{ext} ({})", if ext == 0 { "BASIC" } else { "SIGNED" }),
+            format!(
+                "{ext} ({})",
+                match ext {
+                    0 => "BASIC",
+                    1 => "SIGNED",
+                    _ => "UNKNOWN",
+                }
+            ),
         );
 
+        if ext > 1 {
+            return None;
+        }
+
         if ext == 1 {
-            let (statement_offset, key) = cursor.take(36)?;
+            let (offset, key) = cursor.take(36)?;
 
-            bytes_field(statement_offset, "  ext.nodeID", key);
-            let (statement_offset, len) = cursor.u32()?;
+            bytes_field(offset, "  ext.nodeID", key);
+            let (offset, len) = cursor.u32()?;
 
-            scalar(statement_offset, 4, "  ext.signature length", len);
-            let (statement_offset, sig) = cursor.take(len as usize)?;
+            scalar(offset, 4, "  ext.signature length", len);
+            let (offset, sig) = cursor.take(len as usize)?;
 
-            bytes_field(statement_offset, "  ext.signature", sig);
+            bytes_field(offset, "  ext.signature", sig);
         }
 
         let sv_end = cursor.pos;
@@ -284,46 +289,46 @@ pub fn ledger_header(xdr: &[u8]) {
             "       scpValue spans bytes {sv_start}..{sv_end} ({} bytes) - this is the slice SCP signed",
             sv_end - sv_start
         ));
-        let (statement_offset, tsr) = cursor.take(32)?;
+        let (offset, tsr) = cursor.take(32)?;
 
-        bytes_field(statement_offset, "txSetResultHash", tsr);
-        let (statement_offset, blh) = cursor.take(32)?;
+        bytes_field(offset, "txSetResultHash", tsr);
+        let (offset, blh) = cursor.take(32)?;
 
-        bytes_field(statement_offset, "bucketListHash", blh);
-        let (statement_offset, sequence_number) = cursor.u32()?;
+        bytes_field(offset, "bucketListHash", blh);
+        let (offset, sequence_number) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "ledgerSeq", sequence_number);
-        let (statement_offset, total) = cursor.u64()?;
+        scalar(offset, 4, "ledgerSeq", sequence_number);
+        let (offset, total) = cursor.u64()?;
 
-        scalar(statement_offset, 8, "totalCoins", total);
-        let (statement_offset, fee_pool) = cursor.u64()?;
+        scalar(offset, 8, "totalCoins", total);
+        let (offset, fee_pool) = cursor.u64()?;
 
-        scalar(statement_offset, 8, "feePool", fee_pool);
-        let (statement_offset, inflation) = cursor.u32()?;
+        scalar(offset, 8, "feePool", fee_pool);
+        let (offset, inflation) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "inflationSeq", inflation);
-        let (statement_offset, id_pool) = cursor.u64()?;
+        scalar(offset, 4, "inflationSeq", inflation);
+        let (offset, id_pool) = cursor.u64()?;
 
-        scalar(statement_offset, 8, "idPool", id_pool);
-        let (statement_offset, base_fee) = cursor.u32()?;
+        scalar(offset, 8, "idPool", id_pool);
+        let (offset, base_fee) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "baseFee", base_fee);
-        let (statement_offset, base_reserve) = cursor.u32()?;
+        scalar(offset, 4, "baseFee", base_fee);
+        let (offset, base_reserve) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "baseReserve", base_reserve);
-        let (statement_offset, max_tx) = cursor.u32()?;
+        scalar(offset, 4, "baseReserve", base_reserve);
+        let (offset, max_tx) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "maxTxSetSize", max_tx);
+        scalar(offset, 4, "maxTxSetSize", max_tx);
 
         for index in 0..4 {
-            let (statement_offset, skip) = cursor.take(32)?;
+            let (offset, skip) = cursor.take(32)?;
 
-            bytes_field(statement_offset, &format!("skipList[{index}]"), skip);
+            bytes_field(offset, &format!("skipList[{index}]"), skip);
         }
 
-        let (statement_offset, ext) = cursor.u32()?;
+        let (offset, ext) = cursor.u32()?;
 
-        scalar(statement_offset, 4, "ext", ext);
+        scalar(offset, 4, "ext", ext);
 
         Some(())
     };
@@ -338,22 +343,30 @@ pub fn tx_set(xdr: &[u8], full: bool) {
     header_row();
     let mut cursor = Cursor::new(xdr);
     let mut walk = || -> Option<()> {
-        let (statement_offset, version) = cursor.u32()?;
+        let (offset, version) = cursor.u32()?;
 
         scalar(
-            statement_offset,
+            offset,
             4,
             "GeneralizedTxSet ext",
-            format!("{version} (V1)"),
+            format!(
+                "{version} ({})",
+                if version == 1 { "V1" } else { "UNKNOWN" }
+            ),
         );
-        let (statement_offset, prev) = cursor.take(32)?;
 
-        bytes_field(statement_offset, "previousLedgerHash", prev);
+        if version != 1 {
+            return None;
+        }
+
+        let (offset, prev) = cursor.take(32)?;
+
+        bytes_field(offset, "previousLedgerHash", prev);
         report::raw(&format!(
             "   36  {:>5}  {:<26}  {}",
             cursor.remaining(),
             "phases (not decoded)",
-            shown(&xdr[36..], 32, full)
+            shown(xdr.get(36..)?, 32, full)
         ));
 
         Some(())

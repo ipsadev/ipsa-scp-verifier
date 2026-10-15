@@ -33,3 +33,24 @@ fn a_frame_running_past_the_end_is_an_error() {
     buf.extend_from_slice(b"short");
     assert!(frames(&buf).is_err());
 }
+
+#[test]
+fn the_last_ledger_sequence_has_a_checkpoint_and_no_successor() {
+    assert_eq!(checkpoint_for(u32::MAX), u32::MAX);
+    assert_eq!(checkpoint_for(u32::MAX - 64), u32::MAX - 64);
+    assert_eq!(next_checkpoint(u32::MAX), None);
+    assert_eq!(next_checkpoint(63), Some(127));
+}
+
+#[test]
+fn gunzip_refuses_output_past_its_limit() {
+    use std::io::Write;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+
+    encoder.write_all(&[0u8; 4096]).unwrap();
+    let gzipped = encoder.finish().unwrap();
+
+    assert_eq!(gunzip(&gzipped, 4096).unwrap().len(), 4096);
+    assert!(gunzip(&gzipped, 4095).is_err());
+}

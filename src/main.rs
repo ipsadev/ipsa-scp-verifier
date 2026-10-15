@@ -13,9 +13,9 @@ use ipsa_scp_verifier::rawdump;
 use ipsa_scp_verifier::report;
 use ipsa_scp_verifier::scp::envelope::Envelope;
 use ipsa_scp_verifier::scp::ledger::tx_set_hash_of_value;
-use ipsa_scp_verifier::scp::quorum::QuorumSet;
+use ipsa_scp_verifier::scp::quorum::{NodeId, QuorumSet};
 use ipsa_scp_verifier::serve;
-use ipsa_scp_verifier::steps::{self, HeaderInput, QuorumConfig, VerifiedLedger};
+use ipsa_scp_verifier::steps::{self, Externalized, HeaderInput, QuorumConfig, VerifiedLedger};
 use ipsa_scp_verifier::strkey;
 use ipsa_scp_verifier::sweep;
 
@@ -23,7 +23,7 @@ const TOTAL_STEPS: usize = 8;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "scp-verify",
+    name = "ipsa-scp-verify",
     version,
     about = "Independently verify Stellar SCP consensus for a single ledger",
     long_about = "Verifies, against the public Stellar history archives, that a quorum of \
@@ -41,7 +41,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "PORT",
-        conflicts_with_all = ["ledger", "fixture", "range"],
+        conflicts_with_all = ["ledger", "fixture", "range", "export", "trusted_previous", "negative"],
         help = "Serve per-step verification over HTTP on this port instead of verifying once"
     )]
     serve: Option<u16>,
@@ -74,7 +74,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "HEX",
-        help = "Hex-encoded SCPQuorumSet to evaluate the quorum against; defaults to the set the signers themselves pledge"
+        help = "Hex-encoded SCPQuorumSet you trust; the quorum is evaluated against it. Required to verify, never read from the archive"
     )]
     trust_root: Option<String>,
     #[arg(
@@ -113,7 +113,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "BASE",
-        help = "History archive to read: a base URL, or a local directory. Repeat to merge several archives"
+        help = "History archive to read: a base URL, or a local directory. Repeat to merge several in --range mode"
     )]
     archive: Vec<String>,
     #[arg(
@@ -127,6 +127,7 @@ struct Cli {
         long,
         value_name = "PATH",
         requires = "range",
+        conflicts_with_all = ["scan", "audit"],
         help = "Write one JSON object per swept ledger to this file"
     )]
     jsonl: Option<std::path::PathBuf>,
@@ -165,8 +166,12 @@ async fn main() {
 
 async fn run(args: Cli) -> Result<()> {
     let network = Network::parse(&args.network)?;
+    let trust_root_xdr = match &args.trust_root {
+        Some(hexed) => Some(fixture::unhex(hexed)?),
+        None => None,
+    };
 
-    report::banner(&format!("scp-verify - {}", network.label()));
+    report::banner(&format!("ipsa-scp-verify - {}", network.label()));
     report::detail(&format!("network passphrase: {:?}", network.passphrase()));
     report::detail(&format!(
         "network id = sha256(passphrase) = {}",
@@ -181,17 +186,13 @@ async fn run(args: Cli) -> Result<()> {
             archives: archives(&args, network),
             archives_pinned: !args.archive.is_empty(),
             origins: cors_origins(&args),
+            trust_root_xdr,
         })
         .await;
     }
 
     if let Some(spec) = &args.range {
         let (from, to) = parse_range(spec)?;
-        let trust_root_xdr = match &args.trust_root {
-            Some(hexed) => Some(fixture::unhex(hexed)?),
-            None => None,
-        };
-
         let options = sweep::Options {
             network,
             archives: archives(&args, network),
@@ -220,7 +221,12 @@ async fn run(args: Cli) -> Result<()> {
         };
     }
 
-    let (mut input, next, source) = match (&args.fixture, args.ledger) {
+    if args.fixture.is_none() && args.ledger.is_none() {
+        return Err(Error::NoLedgerSelected);
+    }
+
+    let config = trust_root(trust_root_xdr.as_deref())?;
+    let (mut input, next, source, results_recorded) = match (&args.fixture, args.ledger) {
         (Some(path), _) => {
             report::step("loading a frozen test vector");
             report::explain(
@@ -252,7 +258,18 @@ async fn run(args: Cli) -> Result<()> {
                 ));
             }
 
-            (input, next, format!("fixture {}", path.display()))
+            if fixture.result_pairs_xdr.is_none() {
+                report::detail(
+                    "the fixture records no transaction results, so step 8 will be skipped",
+                );
+            }
+
+            (
+                input,
+                next,
+                format!("fixture {}", path.display()),
+                fixture.result_pairs_xdr.is_some(),
+            )
         }
 
         (None, Some(ledger)) => {
@@ -265,7 +282,12 @@ async fn run(args: Cli) -> Result<()> {
             )
             .await?;
 
-            (input, next, format!("{} history archive", network.label()))
+            (
+                input,
+                next,
+                format!("{} history archive", network.label()),
+                args.results,
+            )
         }
 
         (None, None) => return Err(Error::NoLedgerSelected),
@@ -291,10 +313,15 @@ async fn run(args: Cli) -> Result<()> {
         hex::encode(input.network_id)
     ));
     plan(next.is_some());
-    let config = trust_root(&args, &input)?;
-
     dump_raw_items(&input, next.as_ref(), args.raw);
-    let verified = verify_and_report(&input, &config, next.as_ref(), args.list_signers)?;
+    let results_requested = args.results && results_recorded;
+    let verified = verify_and_report(
+        &input,
+        &config,
+        next.as_ref(),
+        args.list_signers,
+        results_requested,
+    )?;
 
     if let Some(path) = &args.export {
         report::step("exporting a test vector");
@@ -302,7 +329,7 @@ async fn run(args: Cli) -> Result<()> {
             "can this run be replayed offline?",
             "write the same raw bytes back out as JSON, so --fixture reproduces it with no network",
         );
-        to_fixture(network, &input, &verified, next.as_ref()).save(path)?;
+        to_fixture(network, &input, &verified, next.as_ref(), results_requested).save(path)?;
         report::ok(&format!("wrote test vector to {}", path.display()));
     }
 
@@ -394,7 +421,11 @@ async fn from_archive(
     want_next: bool,
     want_results: bool,
 ) -> Result<(HeaderInput, Option<NextSlot>)> {
-    let base = bases[0].as_str();
+    let base = bases.first().map_or(network.archive_base(), String::as_str);
+
+    if bases.len() > 1 {
+        report::warn("verifying one ledger reads only the first --archive; --range merges several");
+    }
     let checkpoint = checkpoint_for(ledger);
 
     report::step("fetching evidence from the history archive");
@@ -463,12 +494,6 @@ async fn from_archive(
         .into_iter()
         .map(history::read_header_history_entry)
         .collect::<Result<Vec<_>>>()?;
-    let parent_hash = ledger.checked_sub(1).and_then(|parent| {
-        archived_headers
-            .iter()
-            .find(|header| header.ledger_seq == parent)
-            .and_then(|header| steps::verify_ledger_hash(&header.header_xdr, None).ok())
-    });
     let header_entry = archived_headers
         .into_iter()
         .find(|header| header.ledger_seq == ledger)
@@ -512,7 +537,7 @@ async fn from_archive(
         quorum_sets_xdr: entry.quorum_sets_xdr.clone(),
         recorded_ledger_hash: Some(header_entry.recorded_hash),
         result_pairs_xdr: result_pairs,
-        trusted_previous_hash: parent_hash,
+        trusted_previous_hash: None,
     };
 
     let next = if want_next {
@@ -603,7 +628,7 @@ async fn fetch_logged(base: &str, category: &str, checkpoint: u32, what: &str) -
 async fn next_slot(base: &str, ledger: u32, scp: &[ScpHistoryEntry]) -> Result<NextSlot> {
     let next = ledger + 1;
     let entry = match scp.iter().find(|entry| entry.ledger_seq == next) {
-        Some(error) => error.clone(),
+        Some(entry) => entry.clone(),
         None => {
             report::detail(&format!(
                 "slot {next} starts the next checkpoint, fetching that one too"
@@ -722,6 +747,7 @@ fn to_fixture(
     input: &HeaderInput,
     v: &VerifiedLedger,
     next: Option<&NextSlot>,
+    results_recorded: bool,
 ) -> Fixture {
     Fixture {
         network: network.label().to_string(),
@@ -740,48 +766,33 @@ fn to_fixture(
         next_tx_set_xdr: next
             .map(|slot| hex::encode(&slot.tx_set_xdr))
             .unwrap_or_default(),
+        next_quorum_sets_xdr: next
+            .map(|slot| slot.quorum_sets_xdr.iter().map(hex::encode).collect())
+            .unwrap_or_default(),
+        result_pairs_xdr: results_recorded
+            .then(|| input.result_pairs_xdr.iter().map(hex::encode).collect()),
     }
 }
 
-fn trust_root(args: &Cli, input: &HeaderInput) -> Result<QuorumConfig> {
+fn trust_root(raw: Option<&[u8]>) -> Result<QuorumConfig> {
     report::step("choosing the trust root");
     report::explain(
         "which validators does this run consider authoritative?",
         "an SCPQuorumSet, checked with stellar-core's isQuorumSetSane(_, true) - threshold at \
          least the v-blocking size",
     );
+    let raw = raw.ok_or(Error::NoTrustRoot)?;
+    let config = QuorumConfig::from_xdr(raw)?;
 
-    if let Some(hexed) = &args.trust_root {
-        let raw = fixture::unhex(hexed)?;
-        let config = QuorumConfig::from_xdr(&raw)?;
-
-        report::ok(&format!(
-            "using --trust-root ({} bytes of SCPQuorumSet XDR)",
-            raw.len()
-        ));
-        report::detail(&format!(
-            "fingerprint (sha256 of the quorum-set XDR): {}",
-            hex::encode(config.fingerprint())
-        ));
-        report::detail("the quorum check below therefore means something about *your* assumptions");
-
-        return Ok(config);
-    }
-
-    let first = input.quorum_sets_xdr.first().ok_or(Error::NoTrustRoot)?;
-    let config = QuorumConfig::from_xdr(first)?;
-
-    report::ok("no --trust-root given: defaulting to the set the signers themselves pledge");
+    report::ok(&format!(
+        "using --trust-root ({} bytes of SCPQuorumSet XDR)",
+        raw.len()
+    ));
     report::detail(&format!(
         "fingerprint (sha256 of the quorum-set XDR): {}",
         hex::encode(config.fingerprint())
     ));
-    report::detail("that fingerprint is the value an operator pins in a relayer config");
-    report::warn(
-        "that default is self-referential - it validates the archive data and the quorum \
-         arithmetic, not the trust decision",
-    );
-    report::detail("pass --trust-root <hex SCPQuorumSet> to evaluate against your own set");
+    report::detail("the quorum check below therefore means something about *your* assumptions");
 
     Ok(config)
 }
@@ -877,7 +888,26 @@ fn verify_and_report(
     config: &QuorumConfig,
     next: Option<&NextSlot>,
     list_signers: bool,
+    results_requested: bool,
 ) -> Result<VerifiedLedger> {
+    report_inputs(input, config, list_signers);
+    let envelopes = check_signatures(input, list_signers)?;
+
+    check_statements(input, &envelopes)?;
+    let signers = check_quorum_sets(input, &envelopes)?;
+    let externalized = check_quorum(config, &signers, &envelopes)?;
+
+    report_value(&externalized, &envelopes);
+    let verified = check_ledger(input, config, externalized.value.len())?;
+
+    check_next_slot(input, config, next, &verified)?;
+    check_results(input, &verified, results_requested)?;
+    report_verdict(next.is_some(), results_requested, &verified, signers.len());
+
+    Ok(verified)
+}
+
+fn report_inputs(input: &HeaderInput, config: &QuorumConfig, list_signers: bool) {
     report::step("inputs");
     report::explain(
         "what exactly is being verified?",
@@ -898,6 +928,9 @@ fn verify_and_report(
     ));
     report::ok("trust root, as a tree:");
     print_quorum_set(&config.local, 0, list_signers);
+}
+
+fn check_signatures(input: &HeaderInput, list_signers: bool) -> Result<Vec<Envelope>> {
     report::numbered_step(1, TOTAL_STEPS, "envelope signatures");
     report::explain(
         "did each of these statements really come from the validator it names?",
@@ -937,12 +970,17 @@ fn verify_and_report(
         "verify_strict rejects small-order and non-canonical points, matching the libsodium \
          rules stellar-core signs under",
     );
+
+    Ok(envelopes)
+}
+
+fn check_statements(input: &HeaderInput, envelopes: &[Envelope]) -> Result<()> {
     report::numbered_step(2, TOTAL_STEPS, "statement validation");
     report::explain(
         "is every statement an EXTERNALIZE for exactly this slot, from a distinct node?",
         "reject any other statement type, any other slotIndex, and any repeated nodeID",
     );
-    steps::reject_duplicate_signers(&envelopes)?;
+    steps::reject_duplicate_signers(envelopes)?;
     report::ok(&format!(
         "all {} statements are EXTERNALIZE for slot {}",
         envelopes.len(),
@@ -953,15 +991,23 @@ fn verify_and_report(
         "without the duplicate check, one node's envelope replayed N times would look like N \
          signers and could fake a quorum",
     );
+
+    Ok(())
+}
+
+fn check_quorum_sets(
+    input: &HeaderInput,
+    envelopes: &[Envelope],
+) -> Result<Vec<(NodeId, QuorumSet)>> {
     report::numbered_step(3, TOTAL_STEPS, "quorum-set authentication");
     report::explain(
         "is the quorum set each node pledges the one it actually signed?",
         "sha256(SCPQuorumSet preimage) must equal that node's commitQuorumSetHash",
     );
     let preimages = steps::index_quorum_sets(&input.quorum_sets_xdr)?;
-    let signers = steps::verify_quorum_set_hashes(&envelopes, &preimages)?;
+    let signers = steps::verify_quorum_set_hashes(envelopes, &preimages)?;
 
-    for (hash, count) in tally_quorum_set_hashes(&envelopes) {
+    for (hash, count) in tally_quorum_set_hashes(envelopes) {
         let shape = preimages
             .get(&hash)
             .map(steps::describe_quorum_set)
@@ -981,6 +1027,15 @@ fn verify_and_report(
         "each advertised set also passes stellar-core's isQuorumSetSane: sane threshold, \
          1..=1000 validators, no duplicates",
     );
+
+    Ok(signers)
+}
+
+fn check_quorum(
+    config: &QuorumConfig,
+    signers: &[(NodeId, QuorumSet)],
+    envelopes: &[Envelope],
+) -> Result<Externalized> {
     report::numbered_step(4, TOTAL_STEPS, "quorum check");
     report::explain(
         "do these signers form a quorum for the configured trust root?",
@@ -988,7 +1043,7 @@ fn verify_and_report(
          by the survivors, repeat to a fixed point, then ask whether the trust root has a slice \
          among what is left",
     );
-    let externalized = steps::verify_externalized_quorum(config, &signers, &envelopes)?;
+    let externalized = steps::verify_externalized_quorum(config, signers, envelopes)?;
 
     report::ok(&format!(
         "isQuorum = true for the {} signer(s) against the trust root",
@@ -1002,12 +1057,17 @@ fn verify_and_report(
         "this is not a signature count - signers you do not trust are not a quorum for you, no \
          matter how many of them there are",
     );
+
+    Ok(externalized)
+}
+
+fn report_value(externalized: &Externalized, envelopes: &[Envelope]) {
     report::numbered_step(5, TOTAL_STEPS, "value agreement");
     report::explain(
         "did every signer commit to the same value, byte for byte?",
         "compare commit.value across all envelopes; ballot counters are deliberately ignored",
     );
-    let value = externalized.value.clone();
+    let value = &externalized.value;
 
     if !externalized.discarded.is_empty() {
         report::warn(&format!(
@@ -1022,34 +1082,41 @@ fn verify_and_report(
     }
 
     report::ok(&format!(
-        "one agreed commit.value, {} bytes, identical across all {} signers",
+        "one agreed commit.value, {} bytes, identical across the {} supporting signers",
         value.len(),
-        envelopes.len()
+        externalized.supporters.len()
     ));
-    report::detail(&format!("sha256(value) = {}", hex_digest(&value)));
+    report::detail(&format!("sha256(value) = {}", hex_digest(value)));
     report::detail(&format!(
         "the value is a StellarValue(txSetHash, closeTime, upgrades); its txSetHash is {}",
-        tx_set_hash_of_value(&value)
+        tx_set_hash_of_value(value)
             .map(hex::encode)
             .unwrap_or_else(|_| "unreadable".into())
     ));
     report::detail(&format!(
         "ballot counters seen: {} - nodes legitimately reach EXTERNALIZE on different counters, \
          so requiring equality would reject valid ledgers",
-        describe_counters(&envelopes)
+        describe_counters(envelopes)
     ));
+}
+
+fn check_ledger(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    value_length: usize,
+) -> Result<VerifiedLedger> {
     report::numbered_step(6, TOTAL_STEPS, "ledger binding");
     report::explain(
         "is this LedgerHeader the header for the value they agreed on?",
         "header.ledgerSeq must equal the slot and header.scpValue must be byte-identical to the \
          agreed value; then ledger_hash = sha256(raw LedgerHeader XDR)",
     );
-    let verified = steps::verify_header(input, config)?;
+    let verified = steps::verify_ledger(input, config)?;
 
     report::ok(&format!("header.ledgerSeq = {}", verified.slot));
     report::ok(&format!(
         "header.scpValue is byte-identical to the agreed value ({} bytes)",
-        value.len()
+        value_length
     ));
     report::ok(&format!(
         "sha256(LedgerHeader) = {}",
@@ -1076,9 +1143,8 @@ fn verify_and_report(
             report::ok("the header names the ledger you already trust at N-1 as its predecessor")
         }
         None => report::detail(
-            "the predecessor is not in this checkpoint and no --trusted-previous was given, so \
-             the parent link is unchecked; this ledger is verified as externalized, not as \
-             connected to a chain you already trust",
+            "no --trusted-previous was given, so the parent link is unchecked; this ledger is \
+             verified as externalized, not as connected to a chain you already trust",
         ),
     }
 
@@ -1088,6 +1154,16 @@ fn verify_and_report(
         "SCP signed only (txSetHash, closeTime, upgrades) - bucketListHash and txSetResultHash \
          are NOT covered by anything above; step 7 is what binds them",
     );
+
+    Ok(verified)
+}
+
+fn check_next_slot(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    next: Option<&NextSlot>,
+    verified: &VerifiedLedger,
+) -> Result<()> {
     report::numbered_step(7, TOTAL_STEPS, "next-slot binding");
     report::explain(
         "does the next ledger point back at this exact header?",
@@ -1161,15 +1237,21 @@ fn verify_and_report(
         }
     }
 
+    Ok(())
+}
+
+fn check_results(
+    input: &HeaderInput,
+    verified: &VerifiedLedger,
+    results_requested: bool,
+) -> Result<()> {
     report::numbered_step(8, TOTAL_STEPS, "result-set binding");
     report::explain(
         "do the archived transaction results match what this header committed to?",
         "sha256(be32(count) ‖ each raw TransactionResultPair) == header.txSetResultHash",
     );
-    let results_checked = !input.result_pairs_xdr.is_empty();
-
-    if !results_checked {
-        report::warn("skipped - no result pairs supplied (fixtures do not carry them)");
+    if !results_requested {
+        report::warn("skipped - --results false, or a fixture that records no results");
     } else {
         steps::verify_result_set(&input.result_pairs_xdr, &verified.tx_set_result_hash)?;
         report::ok(&format!(
@@ -1177,18 +1259,30 @@ fn verify_and_report(
             input.result_pairs_xdr.len(),
             hex::encode(verified.tx_set_result_hash),
         ));
+
+        if input.result_pairs_xdr.is_empty() {
+            report::detail(
+                "the archive holds no results for this ledger, so it was checked as a ledger with \
+                 no transactions: the hash of the empty result set",
+            );
+        }
+
         report::detail(
             "txSetResultHash is not covered by the SCP value - step 7 is what authenticates the \
              header field this was compared against",
         );
-        report::detail(
-            "the IBC light client continues from here: pick the router's result pair, check its \
-             success preimage, and read the ibc_root event that carries the SMT root. Those need \
-             transaction meta, which the history archives do not publish.",
-        );
     }
 
-    report::hint(match (next.is_some(), results_checked) {
+    Ok(())
+}
+
+fn report_verdict(
+    has_next_slot: bool,
+    results_checked: bool,
+    verified: &VerifiedLedger,
+    signers: usize,
+) {
+    report::hint(match (has_next_slot, results_checked) {
         (true, true) => "VERIFIED - all 8 steps passed",
         (true, false) => "VERIFIED - steps 1-7 passed, step 8 skipped",
         (false, true) => "VERIFIED - steps 1-6 and 8 passed, step 7 skipped",
@@ -1197,7 +1291,7 @@ fn verify_and_report(
     report::field("slot", &verified.slot.to_string());
     report::field("ledgerHash", &hex::encode(verified.ledger_hash));
     report::field("closeTime", &verified.close_time.to_string());
-    report::field("signers", &format!("{} validators", signers.len()));
+    report::field("signers", &format!("{} validators", signers));
     report::detail(
         "trust: the quorum was evaluated against the configured trust root only. Safety \
          additionally assumes quorum intersection despite ill-behaved nodes - in SDF's Ivy model \
@@ -1209,8 +1303,6 @@ fn verify_and_report(
          evaluated the predicate after the fact against a configured set; that you are \
          intertwined with the network under that set is an assumption, not a result.",
     );
-
-    Ok(verified)
 }
 
 fn tally_quorum_set_hashes(envelopes: &[Envelope]) -> Vec<([u8; 32], usize)> {
@@ -1284,6 +1376,13 @@ fn run_negative(input: &HeaderInput, config: &QuorumConfig, next: Option<&NextSl
                 report::fail(&format!(
                     "{} [{}] - ACCEPTED, expected {}",
                     case.name, case.step, case.expected
+                ));
+            }
+            Outcome::Skipped(reason) => {
+                failed += 1;
+                report::fail(&format!(
+                    "{} [{}] - could not run: {reason}",
+                    case.name, case.step
                 ));
             }
         }

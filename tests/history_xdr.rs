@@ -68,3 +68,49 @@ fn envelope_spans_round_trip_through_a_synthesised_entry() {
         assert_eq!(archived.signature, strict.signature.to_vec());
     }
 }
+
+#[test]
+fn a_huge_count_is_a_decode_error_not_an_allocation() {
+    let mut scp = 0i32.to_be_bytes().to_vec();
+    scp.extend_from_slice(&u32::MAX.to_be_bytes());
+    assert!(read_scp_history_entry(&scp).is_err());
+
+    let mut envelopes = 0i32.to_be_bytes().to_vec();
+    envelopes.extend_from_slice(&0u32.to_be_bytes());
+    envelopes.extend_from_slice(&7u32.to_be_bytes());
+    envelopes.extend_from_slice(&u32::MAX.to_be_bytes());
+    assert!(read_scp_history_entry(&envelopes).is_err());
+
+    let mut results = 7u32.to_be_bytes().to_vec();
+    results.extend_from_slice(&u32::MAX.to_be_bytes());
+    assert!(read_result_record(&results).is_err());
+}
+
+fn nested_quorum_set_record(depth: usize) -> Vec<u8> {
+    let mut record = 0i32.to_be_bytes().to_vec();
+
+    record.extend_from_slice(&1u32.to_be_bytes());
+
+    for _ in 0..depth {
+        record.extend_from_slice(&1u32.to_be_bytes());
+        record.extend_from_slice(&0u32.to_be_bytes());
+        record.extend_from_slice(&1u32.to_be_bytes());
+    }
+
+    record.extend_from_slice(&1u32.to_be_bytes());
+    record.extend_from_slice(&0u32.to_be_bytes());
+    record.extend_from_slice(&0u32.to_be_bytes());
+    record.extend_from_slice(&0u32.to_be_bytes());
+    record.extend_from_slice(&0u32.to_be_bytes());
+    record
+}
+
+#[test]
+fn quorum_sets_nested_past_the_depth_limit_are_refused() {
+    let shallow = read_scp_history_entry(&nested_quorum_set_record(10));
+
+    assert!(shallow.is_ok(), "the record shape is valid when shallow");
+    assert!(
+        read_scp_history_entry(&nested_quorum_set_record(MAX_XDR_DEPTH as usize + 10)).is_err()
+    );
+}

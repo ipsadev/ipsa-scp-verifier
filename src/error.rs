@@ -76,6 +76,7 @@ pub enum Verdict {
     VerifiedUnanchored,
     Contradicted,
     Insufficient,
+    InvalidEvidence,
 }
 
 impl Error {
@@ -93,6 +94,16 @@ impl VerifyError {
             Self::NoEnvelopes
             | Self::QuorumSetPreimageMissing { .. }
             | Self::InsufficientQuorum { .. } => Verdict::Insufficient,
+            Self::MalformedXdr { .. }
+            | Self::NotExternalize { .. }
+            | Self::InsaneStatement { .. }
+            | Self::SlotMismatch { .. }
+            | Self::EmptyCommitValue { .. }
+            | Self::DuplicateSigner { .. }
+            | Self::InvalidPublicKey { .. }
+            | Self::InvalidSignature { .. }
+            | Self::InsaneQuorumSet { .. }
+            | Self::SignatureVerifierFailed { .. } => Verdict::InvalidEvidence,
             _ => Verdict::Contradicted,
         }
     }
@@ -110,6 +121,8 @@ pub enum Error {
     ArchiveRequest { url: String, detail: String },
     #[error("reading the body of {url}: {detail}")]
     ArchiveBody { url: String, detail: String },
+    #[error("{url} is larger than the {limit}-byte download limit")]
+    ArchiveTooLarge { url: String, limit: usize },
     #[error("gunzipping {url}: {detail}")]
     ArchiveGunzip { url: String, detail: String },
     #[error("parsing {url}: {detail}")]
@@ -136,9 +149,11 @@ pub enum Error {
     NoLedgerHeader { ledger: u32 },
     #[error("no tx set archived for ledger {ledger}")]
     NoTxSet { ledger: u32 },
-    #[error("the ledger carries no quorum sets")]
-    NoQuorumSets,
-    #[error("no quorum-set preimages to derive a trust root from")]
+    #[error(
+        "no trust root: pass the SCPQuorumSet you trust as hex. The verifier will not take one \
+         from the archive it is checking, because whoever writes the archive would then choose \
+         who counts as a quorum"
+    )]
     NoTrustRoot,
     #[error("reading fixture {path}: {detail}")]
     FixtureRead { path: String, detail: String },
@@ -170,16 +185,10 @@ pub enum Error {
     DecoderDisagreement { field: String, node: String },
     #[error("binding {address}: {detail}")]
     ServeBind { address: String, detail: String },
-    #[error("reading the request body: {detail}")]
-    ServeReadBody { detail: String },
-    #[error("the request body is not UTF-8")]
-    ServeBodyNotUtf8,
     #[error("parsing the request body: {detail}")]
     ServeParseBody { detail: String },
-    #[error("writing the response: {detail}")]
-    ServeWriteResponse { detail: String },
-    #[error("serialising the response: {detail}")]
-    ServeSerialize { detail: String },
+    #[error("serving: {detail}")]
+    Serve { detail: String },
     #[error("writing a jsonl row: {detail}")]
     JsonlWrite { detail: String },
     #[error(
@@ -195,6 +204,8 @@ pub enum Error {
     NoArchiveServedCheckpoint { checkpoint: u32, detail: String },
     #[error("{count} disagreement(s); every other outcome is an archive property")]
     Disagreements { count: usize },
+    #[error("{count} archived transaction set(s) do not hash to the txSetHash their header names")]
+    AuditMismatches { count: usize },
     #[error(
         "ledger {ledger} is not archived yet: it needs checkpoint {checkpoint}, and this archive \
          is only published through ledger {latest}. Checkpoints close every {frequency} ledgers \

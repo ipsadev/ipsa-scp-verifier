@@ -65,6 +65,7 @@ pub struct Evidence {
 
 pub struct NextSlot<'a> {
     pub envelopes_xdr: &'a [Vec<u8>],
+    pub quorum_sets_xdr: &'a [Vec<u8>],
     pub tx_set_xdr: &'a [u8],
 }
 
@@ -176,7 +177,7 @@ pub fn apply_mutation(name: &str, input: &HeaderInput) -> Result<Mutated, String
                 .first_mut()
                 .ok_or_else(|| "no envelopes to tamper with".to_string())?;
 
-            flip_at(first, STATEMENT_TYPE_OFFSET, "the envelope")?;
+            flip_at(first, STATEMENT_TYPE_OFFSET + 3, "the envelope")?;
         }
         "missing-quorum-set" => output.quorum_sets_xdr.clear(),
         "tampered-quorum-set" => {
@@ -353,7 +354,7 @@ pub fn evaluate(
         ),
     ));
     let externalized = match steps::verify_externalized_quorum(config, &signers, &envelopes) {
-        Ok(error) => error,
+        Ok(externalized) => externalized,
         Err(error) => {
             report(failed(4, "quorum check", &error));
 
@@ -436,10 +437,10 @@ pub fn evaluate(
     }
 
     let parent_link = match input.trusted_previous_hash {
-        Some(_) => "parent link verified against the preceding ledger",
+        Some(_) => "parent link verified against the ledger hash you trust at N-1",
         None => {
-            "parent link NOT checked: no preceding ledger was supplied, so this shows the \
-             trust root signed this ledger, not that it is on the chain"
+            "parent link NOT checked: no trusted N-1 hash was supplied, so this shows the \
+             trust root signed this ledger, not that it is on the chain you already trust"
         }
     };
 
@@ -452,13 +453,13 @@ pub fn evaluate(
         ),
     ));
 
-    match next {
-        Some(n) if !n.tx_set_xdr.is_empty() => {
+    match (next, input.slot.checked_add(1)) {
+        (Some(n), Some(next_slot)) if !n.tx_set_xdr.is_empty() => {
             let next_input = HeaderInput {
-                slot: input.slot + 1,
+                slot: next_slot,
                 network_id: input.network_id,
                 envelopes_xdr: n.envelopes_xdr.to_vec(),
-                quorum_sets_xdr: input.quorum_sets_xdr.clone(),
+                quorum_sets_xdr: n.quorum_sets_xdr.to_vec(),
                 ..HeaderInput::default()
             };
 
@@ -468,7 +469,7 @@ pub fn evaluate(
                         Ok(()) => report(ok(
                             7,
                             "next-slot binding",
-                            format!("slot {} names this ledger as predecessor", input.slot + 1),
+                            format!("slot {next_slot} names this ledger as predecessor"),
                         )),
                         Err(error) => report(failed(7, "next-slot binding", &error)),
                     }
@@ -484,7 +485,11 @@ pub fn evaluate(
     }
 
     if input.result_pairs_xdr.is_empty() {
-        report(skipped(8, "result-set binding", "no result set supplied"));
+        report(skipped(
+            8,
+            "result-set binding",
+            "transaction results were not supplied, so txSetResultHash is not checked",
+        ));
     } else {
         match steps::verify_result_set(&input.result_pairs_xdr, &header.tx_set_result_hash) {
             Ok(()) => report(ok(

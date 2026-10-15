@@ -10,8 +10,16 @@ use crate::error::{Error, Result};
 
 pub const CHECKPOINT_FREQUENCY: u32 = 64;
 
+pub const MAX_DOWNLOAD_BYTES: usize = 256 * 1024 * 1024;
+
+pub const MAX_GUNZIPPED_BYTES: u64 = 1024 * 1024 * 1024;
+
 pub fn checkpoint_for(ledger: u32) -> u32 {
-    ((ledger / CHECKPOINT_FREQUENCY) + 1) * CHECKPOINT_FREQUENCY - 1
+    ledger | (CHECKPOINT_FREQUENCY - 1)
+}
+
+pub fn next_checkpoint(checkpoint: u32) -> Option<u32> {
+    checkpoint.checked_add(CHECKPOINT_FREQUENCY)
 }
 
 pub fn is_remote(base: &str) -> bool {
@@ -38,7 +46,11 @@ fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent("scp-verifier/1.0")
+            .user_agent(concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION")
+            ))
             .build()
             .expect("the http client builds from static configuration")
     })
@@ -63,7 +75,7 @@ pub async fn latest_ledger(base: &str) -> Result<u32> {
 
     root.get("currentLedger")
         .and_then(serde_json::Value::as_u64)
-        .map(|ledger| ledger as u32)
+        .and_then(|ledger| u32::try_from(ledger).ok())
         .ok_or(Error::ArchiveNoCurrentLedger { url })
 }
 
@@ -124,14 +136,20 @@ pub async fn fetch(base: &str, category: &str, checkpoint: u32) -> Result<Vec<u8
         })?
     };
 
+    gunzip(&gzipped, MAX_GUNZIPPED_BYTES).map_err(|detail| Error::ArchiveGunzip { url, detail })
+}
+
+pub fn gunzip(gzipped: &[u8], limit: u64) -> core::result::Result<Vec<u8>, String> {
     let mut output = Vec::new();
 
-    GzDecoder::new(gzipped.as_slice())
+    GzDecoder::new(gzipped)
+        .take(limit.saturating_add(1))
         .read_to_end(&mut output)
-        .map_err(|error| Error::ArchiveGunzip {
-            url: url.clone(),
-            detail: error.to_string(),
-        })?;
+        .map_err(|error| error.to_string())?;
+
+    if output.len() as u64 > limit {
+        return Err(format!("it expands past the {limit}-byte limit"));
+    }
 
     Ok(output)
 }
@@ -155,12 +173,33 @@ async fn remote_bytes(url: &str) -> Result<Vec<u8>> {
         });
     }
 
-    let bytes = response.bytes().await.map_err(|error| Error::ArchiveBody {
+    let too_large = || Error::ArchiveTooLarge {
+        url: url.to_string(),
+        limit: MAX_DOWNLOAD_BYTES,
+    };
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_DOWNLOAD_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+
+    let mut response = response;
+    let mut body = Vec::new();
+
+    while let Some(chunk) = response.chunk().await.map_err(|error| Error::ArchiveBody {
         url: url.to_string(),
         detail: error.to_string(),
-    })?;
+    })? {
+        if body.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
+            return Err(too_large());
+        }
 
-    Ok(bytes.to_vec())
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
 }
 
 pub fn frames(buffer: &[u8]) -> Result<Vec<&[u8]>> {

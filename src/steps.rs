@@ -504,6 +504,30 @@ pub fn verify_result_set(
     })
 }
 
+pub fn verify_ledger(input: &HeaderInput, config: &QuorumConfig) -> Result<VerifiedLedger> {
+    if input.envelopes_xdr.is_empty() {
+        return Err(VerifyError::NoEnvelopes);
+    }
+
+    let envelopes = input
+        .envelopes_xdr
+        .iter()
+        .map(|raw| validate_externalize(raw, input.slot))
+        .collect::<Result<Vec<_>>>()?;
+
+    for envelope in &envelopes {
+        verify_envelope_signature(envelope, &input.network_id)?;
+    }
+
+    reject_duplicate_signers(&envelopes)?;
+    let preimages = index_quorum_sets(&input.quorum_sets_xdr)?;
+    let signers = verify_quorum_set_hashes(&envelopes, &preimages)?;
+
+    verify_externalized_quorum(config, &signers, &envelopes)?;
+
+    verify_header(input, config)
+}
+
 pub fn verify_header(input: &HeaderInput, config: &QuorumConfig) -> Result<VerifiedLedger> {
     if input.envelopes_xdr.is_empty() {
         return Err(VerifyError::NoEnvelopes);

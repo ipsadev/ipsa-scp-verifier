@@ -32,6 +32,10 @@ pub struct Fixture {
     pub next_envelopes_xdr: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub next_tx_set_xdr: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_quorum_sets_xdr: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_pairs_xdr: Option<Vec<String>>,
 }
 
 impl Fixture {
@@ -81,7 +85,12 @@ impl Fixture {
                 .iter()
                 .map(|hexed| unhex(hexed))
                 .collect::<Result<_>>()?,
-            result_pairs_xdr: Vec::new(),
+            result_pairs_xdr: self
+                .result_pairs_xdr
+                .iter()
+                .flatten()
+                .map(|hexed| unhex(hexed))
+                .collect::<Result<_>>()?,
             recorded_ledger_hash: Some(unhex32(&self.ledger_hash)?),
             trusted_previous_hash: None,
         };
@@ -95,7 +104,14 @@ impl Fixture {
                     .iter()
                     .map(|hexed| unhex(hexed))
                     .collect::<Result<_>>()?,
-                quorum_sets_xdr: input.quorum_sets_xdr.clone(),
+                quorum_sets_xdr: if self.next_quorum_sets_xdr.is_empty() {
+                    input.quorum_sets_xdr.clone()
+                } else {
+                    self.next_quorum_sets_xdr
+                        .iter()
+                        .map(|hexed| unhex(hexed))
+                        .collect::<Result<_>>()?
+                },
                 tx_set_xdr: unhex(&self.next_tx_set_xdr)?,
             })
         };

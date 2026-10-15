@@ -131,6 +131,7 @@ fn the_negative_suite_fails_closed_on_mainnet() {
                 "[{}] {}: ACCEPTED, expected {}",
                 case.step, case.name, case.expected
             ),
+            Outcome::Skipped(reason) => panic!("[{}] {}: skipped, {reason}", case.step, case.name),
         }
     }
 }
@@ -180,4 +181,16 @@ fn fixtures_round_trip_through_json() {
         assert_eq!(a.envelopes_xdr, b.envelopes_xdr, "{name}");
         assert_eq!(a.quorum_sets_xdr, b.quorum_sets_xdr, "{name}");
     }
+}
+
+#[test]
+fn the_negative_suite_skips_rather_than_panics_on_empty_input() {
+    let f = fixture("mainnet-63907880.json");
+    let config = trust_root(&f);
+    let empty = ipsa_scp_verifier::steps::HeaderInput::default();
+    let cases = negative::run_suite(&empty, &config, None);
+
+    assert!(cases
+        .iter()
+        .any(|case| matches!(case.outcome, Outcome::Skipped(_))));
 }

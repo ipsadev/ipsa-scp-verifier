@@ -3,7 +3,7 @@ use tools::{crosscheck, sync};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use sync::{Mode, Outcome};
@@ -14,7 +14,7 @@ const EXIT_NO_TARGET: u8 = 2;
 #[derive(Parser)]
 #[command(
     name = "tools",
-    about = "Repository tasks for scp-verifier: sync checks and the independent cross-check"
+    about = "Repository tasks for ipsa-scp-verifier: the vendored-copy sync check and the independent cross-check"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,12 +23,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Task {
-    #[command(about = "Diff (or regenerate) the copy of this verifier in the ipsa CLI")]
+    #[command(about = "Diff (or regenerate) a vendored copy of this verifier's sources")]
     VerifySync {
         #[arg(long, help = "Rewrite the target from this crate instead of diffing")]
         write: bool,
-        #[arg(long, value_name = "PATH", help = "The ipsa cli/src/verify directory")]
-        target: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "The directory holding the vendored copy"
+        )]
+        target: PathBuf,
     },
 
     #[command(
@@ -39,6 +43,12 @@ enum Task {
         network: String,
         #[arg(long, value_name = "SEQ")]
         ledger: u32,
+        #[arg(
+            long,
+            value_name = "HEX",
+            help = "Hex-encoded SCPQuorumSet you trust; the quorum is evaluated against it"
+        )]
+        trust_root: String,
         #[arg(long, value_name = "PATH", help = "Write a JSON test vector")]
         export: Option<PathBuf>,
     },
@@ -80,17 +90,26 @@ fn run(cli: Cli) -> Result<u8> {
 
     match cli.task {
         Task::VerifySync { write, target } => {
+            if !target.is_dir() {
+                eprintln!("target directory not found: {}", target.display());
+                return Ok(EXIT_NO_TARGET);
+            }
+
             let mode = if write { Mode::Write } else { Mode::Check };
             let outcome = sync::verify(mode, &root, target)?;
-            Ok(report("the ipsa verify copy", &outcome))
+            Ok(report("the vendored copy", &outcome))
         }
         Task::ChainCheck {
             network,
             ledger,
+            trust_root,
             export,
         } => {
             let net = crosscheck::network(&network)?;
-            crosscheck::run(&net, ledger, export.as_deref())?;
+            let raw = hex::decode(trust_root.trim()).context("--trust-root is not hex")?;
+            let trust_root = crosscheck::parse_quorum_set(&raw).context("--trust-root")?;
+
+            crosscheck::run(&net, ledger, &trust_root, export.as_deref())?;
             Ok(0)
         }
     }
@@ -101,9 +120,6 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("error: {error:#}");
-            if error.to_string().contains("not found") {
-                return ExitCode::from(EXIT_NO_TARGET);
-            }
             ExitCode::FAILURE
         }
     }
