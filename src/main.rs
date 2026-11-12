@@ -1285,8 +1285,14 @@ fn report_verdict(
     report::hint(match (has_next_slot, results_checked) {
         (true, true) => "VERIFIED - all 8 steps passed",
         (true, false) => "VERIFIED - steps 1-7 passed, step 8 skipped",
-        (false, true) => "VERIFIED - steps 1-6 and 8 passed, step 7 skipped",
-        (false, false) => "VERIFIED - steps 1-6 passed, steps 7 and 8 skipped",
+        (false, true) => {
+            "VERIFIED (PARTIAL) - steps 1-6 and 8 passed, step 7 skipped; the header was not \
+             authenticated"
+        }
+        (false, false) => {
+            "VERIFIED (PARTIAL) - steps 1-6 passed, steps 7 and 8 skipped; the header was not \
+             authenticated"
+        }
     });
     report::field("slot", &verified.slot.to_string());
     report::field("ledgerHash", &hex::encode(verified.ledger_hash));

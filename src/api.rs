@@ -194,6 +194,7 @@ pub async fn verify_with_cache(
     }
 
     let following = ledger.checked_add(1);
+    let mut next_slot_unavailable: Option<String> = None;
 
     let next_source: Option<Arc<Checkpoint>> = match following {
         None => None,
@@ -218,7 +219,13 @@ pub async fn verify_with_cache(
 
                                 Some(fresh)
                             }
-                            Err(_) => None,
+                            Err(error) => {
+                                next_slot_unavailable = Some(format!(
+                                    "could not load checkpoint {next_checkpoint:#010x} for slot {following} to bind this boundary ledger: {error}"
+                                ));
+
+                                None
+                            }
                         }
                     }
                 }
@@ -246,5 +253,9 @@ pub async fn verify_with_cache(
             tx_set_xdr: tx_set,
         });
 
-    Ok(evaluate::evaluate(&input, &config, next, mutation))
+    let mut report = evaluate::evaluate(&input, &config, next, mutation);
+
+    report.next_slot_unavailable = next_slot_unavailable;
+
+    Ok(report)
 }

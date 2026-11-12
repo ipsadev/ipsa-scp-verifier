@@ -64,6 +64,10 @@ fn without_next_slot_evidence_a_clean_ledger_is_only_partial() {
         "verified must not be true when the header was never authenticated"
     );
     assert_eq!(report.verdict, Verdict::VerifiedPartial);
+    assert!(
+        report.next_slot_unavailable.is_none(),
+        "the library leaves the boundary-fetch reason for the server to set"
+    );
 }
 
 #[test]
