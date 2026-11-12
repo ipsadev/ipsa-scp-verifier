@@ -1,4 +1,5 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::VerifyError;
 use crate::steps::{self, HeaderInput, QuorumConfig};
@@ -73,7 +74,7 @@ pub struct NextSlot<'a> {
     pub tx_set_xdr: &'a [u8],
 }
 
-pub const MUTATIONS: [(&str, &str); 14] = [
+pub const MUTATIONS: [(&str, &str); 15] = [
     ("tampered-signature", "envelope signatures"),
     ("wrong-network", "envelope signatures"),
     ("wrong-slot", "envelope signatures"),
@@ -88,6 +89,7 @@ pub const MUTATIONS: [(&str, &str); 14] = [
     ("wrong-scp-value", "ledger binding"),
     ("tampered-ledger-header", "ledger binding"),
     ("tampered-result-pairs", "result-set binding"),
+    ("malicious-archive", "next-slot binding"),
 ];
 
 const STATEMENT_TYPE_OFFSET: usize = 44;
@@ -213,6 +215,18 @@ pub fn apply_mutation(name: &str, input: &HeaderInput) -> Result<Mutated, String
             "the ledger header",
         )?,
         "tampered-ledger-header" => flip_last(&mut output.ledger_header_xdr, "the ledger header")?,
+        "malicious-archive" => {
+            let header = crate::scp::ledger::LedgerHeader::decode(&output.ledger_header_xdr)
+                .map_err(|error| format!("decoding the ledger header: {error}"))?;
+            let position = output
+                .ledger_header_xdr
+                .windows(32)
+                .position(|window| window == &header.bucket_list_hash[..])
+                .ok_or_else(|| "bucketListHash not found in the header bytes".to_string())?;
+
+            output.ledger_header_xdr[position] ^= 0x01;
+            output.recorded_ledger_hash = Some(Sha256::digest(&output.ledger_header_xdr).into());
+        }
         "tampered-result-pairs" => {
             let first = output
                 .result_pairs_xdr
@@ -381,7 +395,7 @@ pub fn evaluate(
         4,
         "quorum check",
         format!(
-            "{} signer(s) form a quorum for the trust root, {} discarded",
+            "{} signer(s) form a quorum for the trust root, {} discarded (verify_externalized_quorum: each signer's own published quorum set ratifies)",
             externalized.supporters.len(),
             externalized.discarded.len()
         ),

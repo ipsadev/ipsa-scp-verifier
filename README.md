@@ -95,6 +95,8 @@ the server runs at most 4 verifications at once and answers 503 beyond that, giv
 - **tie it to the next slot** - slot N+1's tx set hashes to what N+1 externalized, and names ledger N as its predecessor
 - **check the results** - the archived result pairs hash to `header.txSetResultHash`. a ledger with no archived results is checked as a ledger with no transactions, against the hash of the empty set
 
+two quorum predicates exist, and a ledger can pass one and fail the other. the report and the http server run `verify_externalized_quorum` - every signer's own published quorum set must itself ratify the value, the stricter check - and the step-4 `quorum check` line names it as the predicate behind the verdict. the full `verify_ledger` (the cli and the range sweep) then also runs `verify_header`, which re-derives the same value through stellar-core's ballot path (`confirm_commit`), so a ledger the cli accepts has passed both; `verify_header` on its own is the light-client subset, which drops the signers' own quorum sets and leans on the pinned trust root plus the quorum-intersection assumption.
+
 the archive is untrusted input throughout: downloads are capped at 256 MiB, gunzipped files at 1 GiB, xdr nesting at 500 levels, and no count read from a file is used to reserve memory.
 
 ## testing

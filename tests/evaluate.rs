@@ -123,7 +123,7 @@ fn a_clean_ledger_reports_its_hash() {
 
 #[test]
 fn every_mutation_fails_the_step_it_targets() {
-    let (input, config, _, _) = load();
+    let (input, config, next_envelopes, next_tx_set) = load();
 
     for (name, expected_step) in MUTATIONS {
         if name == "tampered-result-pairs" && input.result_pairs_xdr.is_empty() {
@@ -134,9 +134,27 @@ fn every_mutation_fails_the_step_it_targets() {
             continue;
         }
 
+        if name == "malicious-archive" && next_tx_set.is_empty() {
+            continue;
+        }
+
         let mutated = apply_mutation(name, &input).unwrap();
         let config = mutated.config.clone().unwrap_or_else(|| config.clone());
-        let report = run(&mutated.input, &config, Some(name));
+
+        let report = if name == "malicious-archive" {
+            evaluate(
+                &mutated.input,
+                &config,
+                Some(NextSlot {
+                    envelopes_xdr: &next_envelopes,
+                    quorum_sets_xdr: &input.quorum_sets_xdr,
+                    tx_set_xdr: &next_tx_set,
+                }),
+                Some(name.to_string()),
+            )
+        } else {
+            run(&mutated.input, &config, Some(name))
+        };
 
         assert!(!report.verified, "{name} was accepted");
 
@@ -153,6 +171,51 @@ fn every_mutation_fails_the_step_it_targets() {
         );
         assert!(failing[0].error.is_some(), "{name} reported no error");
     }
+}
+
+#[test]
+fn the_recomputed_hash_attack_is_only_caught_by_the_next_slot_binding() {
+    let (input, config, next_envelopes, next_tx_set) = load();
+    let mutated = apply_mutation("malicious-archive", &input).unwrap();
+
+    let without = run(&mutated.input, &config, None);
+
+    assert!(without.scp_verified, "the consensus steps still pass");
+    for step in without.steps.iter().filter(|s| s.step <= 6) {
+        assert!(
+            step.passed,
+            "step {} should pass on the recomputed recorded hash: {:?}",
+            step.step, step.error
+        );
+    }
+    assert!(
+        !without.header_authenticated,
+        "the tampered bucketListHash is not authenticated without slot N+1 evidence"
+    );
+    assert!(!without.verified);
+    assert_eq!(without.verdict, Verdict::VerifiedPartial);
+
+    if next_tx_set.is_empty() {
+        return;
+    }
+
+    let with = evaluate(
+        &mutated.input,
+        &config,
+        Some(NextSlot {
+            envelopes_xdr: &next_envelopes,
+            quorum_sets_xdr: &input.quorum_sets_xdr,
+            tx_set_xdr: &next_tx_set,
+        }),
+        Some("malicious-archive".to_string()),
+    );
+    let seven = with.steps.iter().find(|s| s.step == 7).unwrap();
+
+    assert!(
+        !seven.passed && !seven.skipped,
+        "the slot N+1 binding must catch the tampered header: {seven:?}"
+    );
+    assert!(!with.verified);
 }
 
 #[test]
