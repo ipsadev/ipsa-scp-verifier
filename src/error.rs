@@ -73,6 +73,7 @@ pub enum VerifyError {
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Verified,
+    VerifiedPartial,
     VerifiedUnanchored,
     Contradicted,
     Insufficient,

@@ -33,8 +33,8 @@ fn a_clean_ledger_passes_every_archive_verifiable_step() {
     let report = run(&input, &config, None);
 
     assert!(
-        report.verified,
-        "expected a clean verify, got {:?}",
+        report.scp_verified,
+        "expected the consensus steps to pass, got {:?}",
         report.steps
     );
     assert_eq!(report.ledger, 63_907_880);
@@ -47,6 +47,58 @@ fn a_clean_ledger_passes_every_archive_verifiable_step() {
             step.step, step.error
         );
     }
+}
+
+#[test]
+fn without_next_slot_evidence_a_clean_ledger_is_only_partial() {
+    let (input, config, _, _) = load();
+    let report = run(&input, &config, None);
+
+    assert!(report.scp_verified, "consensus should be verified");
+    assert!(
+        !report.header_authenticated,
+        "the header is not authenticated without the slot N+1 binding"
+    );
+    assert!(
+        !report.verified,
+        "verified must not be true when the header was never authenticated"
+    );
+    assert_eq!(report.verdict, Verdict::VerifiedPartial);
+    assert!(
+        report.next_slot_unavailable.is_none(),
+        "the library leaves the boundary-fetch reason for the server to set"
+    );
+}
+
+#[test]
+fn with_next_slot_evidence_a_clean_ledger_is_fully_verified() {
+    let (input, config, next_envelopes, next_tx_set) = load();
+    if next_tx_set.is_empty() {
+        return;
+    }
+
+    let report = evaluate(
+        &input,
+        &config,
+        Some(NextSlot {
+            envelopes_xdr: &next_envelopes,
+            quorum_sets_xdr: &input.quorum_sets_xdr,
+            tx_set_xdr: &next_tx_set,
+        }),
+        None,
+    );
+
+    assert!(report.scp_verified, "consensus should be verified");
+    assert!(
+        report.header_authenticated,
+        "the slot N+1 binding should authenticate the header: {:?}",
+        report.steps
+    );
+    assert!(
+        report.verified,
+        "expected a clean verify: {:?}",
+        report.steps
+    );
 }
 
 #[test]

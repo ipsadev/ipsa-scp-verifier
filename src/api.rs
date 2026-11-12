@@ -194,20 +194,57 @@ pub async fn verify_with_cache(
     }
 
     let following = ledger.checked_add(1);
-    let next_source = following
-        .filter(|following| archive::checkpoint_for(*following) == checkpoint)
-        .map(|following| (following, &loaded));
+    let mut next_slot_unavailable: Option<String> = None;
 
-    let next_evidence = next_source.and_then(|(following, source)| {
-        let slot = source.slots.get(&following)?;
-        let tx_set = source.tx_sets.get(&following)?.clone()?;
+    let next_source: Option<Arc<Checkpoint>> = match following {
+        None => None,
+        Some(following) => {
+            let next_checkpoint = archive::checkpoint_for(following);
 
-        Some((
-            slot.externalize_xdr.clone(),
-            slot.quorum_sets_xdr.clone(),
-            tx_set,
-        ))
-    });
+            if next_checkpoint == checkpoint {
+                Some(Arc::clone(&loaded))
+            } else {
+                let next_key = (sweep_opts.archives.clone(), next_checkpoint);
+
+                match cache.and_then(|cache| cache.get(&next_key)) {
+                    Some(hit) => Some(hit),
+                    None => {
+                        match sweep::load_checkpoint(next_checkpoint, &sweep_opts, true).await {
+                            Ok(fresh) => {
+                                let fresh = Arc::new(fresh);
+
+                                if let Some(cache) = cache {
+                                    cache.put(next_key, Arc::clone(&fresh));
+                                }
+
+                                Some(fresh)
+                            }
+                            Err(error) => {
+                                next_slot_unavailable = Some(format!(
+                                    "could not load checkpoint {next_checkpoint:#010x} for slot {following} to bind this boundary ledger: {error}"
+                                ));
+
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let next_evidence = match (following, next_source.as_ref()) {
+        (Some(following), Some(source)) => source.slots.get(&following).and_then(|slot| {
+            let tx_set = source.tx_sets.get(&following)?.clone()?;
+
+            Some((
+                slot.externalize_xdr.clone(),
+                slot.quorum_sets_xdr.clone(),
+                tx_set,
+            ))
+        }),
+        _ => None,
+    };
     let next = next_evidence
         .as_ref()
         .map(|(envelopes, quorum_sets, tx_set)| NextSlot {
@@ -216,5 +253,9 @@ pub async fn verify_with_cache(
             tx_set_xdr: tx_set,
         });
 
-    Ok(evaluate::evaluate(&input, &config, next, mutation))
+    let mut report = evaluate::evaluate(&input, &config, next, mutation);
+
+    report.next_slot_unavailable = next_slot_unavailable;
+
+    Ok(report)
 }

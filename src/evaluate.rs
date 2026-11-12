@@ -18,8 +18,12 @@ pub struct StepResult {
 pub struct Report {
     pub ledger: u64,
     pub verified: bool,
+    pub scp_verified: bool,
+    pub header_authenticated: bool,
+    pub results_verified: bool,
     pub verdict: crate::error::Verdict,
     pub anchored: bool,
+    pub next_slot_unavailable: Option<String>,
     pub signers: usize,
     pub ledger_hash: Option<String>,
     pub mutation: Option<String>,
@@ -540,21 +544,32 @@ fn finish(
     ledger_hash: Option<[u8; 32]>,
     evidence: Evidence,
 ) -> Report {
-    let verified = steps_out.iter().all(|step| step.passed || step.skipped);
-    let anchored = input.trusted_previous_hash.is_some();
-    let verdict = steps_out.iter().find_map(|step| step.verdict).unwrap_or({
-        if anchored {
-            crate::error::Verdict::Verified
-        } else {
-            crate::error::Verdict::VerifiedUnanchored
-        }
-    });
+    let passed = |step: usize| steps_out.iter().any(|s| s.step == step && s.passed);
+
+    let scp_verified = (1..=5).all(&passed);
+    let header_authenticated = passed(6) && passed(7);
+    let results_verified = passed(8);
+    let anchored = input.trusted_previous_hash.is_some() && passed(6);
+
+    let failure_verdict = steps_out.iter().find_map(|step| step.verdict);
+    let verified = failure_verdict.is_none() && scp_verified && header_authenticated;
+
+    let verdict = match failure_verdict {
+        Some(reported) => reported,
+        None if verified && anchored => crate::error::Verdict::Verified,
+        None if verified => crate::error::Verdict::VerifiedUnanchored,
+        None => crate::error::Verdict::VerifiedPartial,
+    };
 
     Report {
         ledger: input.slot,
         verified,
+        scp_verified,
+        header_authenticated,
+        results_verified,
         verdict,
         anchored,
+        next_slot_unavailable: None,
         signers,
         ledger_hash: ledger_hash.map(hex::encode),
         mutation,
