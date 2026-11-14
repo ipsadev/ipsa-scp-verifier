@@ -108,18 +108,9 @@ just ci     # fmt, clippy, tests, cargo audit
 just live   # verify a real mainnet ledger over the network
 ```
 
-`tests/quorum_oracle.rs` throws 20,000 random federations at it, up to 8 nodes with nested quorum sets,
-and checks `is_quorum` against an exhaustive search over every closed subset, and `is_quorum_slice`
-against a dumb counting version written separately in the same file. if the fixed point and brute force
-ever disagree, one of them is wrong. runs every time, takes a fraction of a second.
-
-then `tests/core_differential.rs`, which is the one that actually matters. 2,000 generated cases run
-through stellar-core's own code - compiled out of a real stellar-core tree.
-
-getting stellar-core to build in isolation is the annoying part, and that's what `core-oracle/` is for.
-`oracle.cpp` pulls the quorum code out and puts a line protocol in front of it; `stubs.cpp` fills in
-everything else stellar-core wants to link but the predicate never touches. the test spawns it, pipes
-cases in on stdin, reads verdicts back off stdout. point `CORE_ORACLE` at the built binary to run it.
+the quorum whitepaper oracle and the stellar-core differential now live in the core verifier
+(`stellar-consensus-verifier`), where they test its `is_quorum`, `is_quorum_slice` and `check_sane`
+directly, together with the `core-oracle/` harness that wraps a real stellar-core tree.
 
 `tools/src/crosscheck.rs` does the same trick at the other end - verifies a whole ledger a second time
 through a completely separate implementation, different xdr reader, `ring` instead of `sha2` +
@@ -167,15 +158,6 @@ and `--negative` flips one field at a time to confirm each step actually fails w
 | `crosscheck.rs` | the independent implementation behind `chain-check`, sharing no code and using `ring` |
 | `sync.rs` | `verify-sync`: diff or regenerate a vendored copy of the verifier's sources at `--target` |
 | `main.rs` | the task runner's cli |
-
-### `core-oracle/` - stellar-core, wrapped
-
-| file | what it does |
-|---|---|
-| `oracle.cpp` | stellar-core's quorum predicates behind a line protocol on stdin/stdout |
-| `stubs.cpp` | stands in for everything stellar-core links that the predicate does not need |
-| `Dockerfile`, `build-oracle.sh` | build it against a real stellar-core tree |
-| `oracle-docker` | wrapper so `CORE_ORACLE` can point at the container |
 
 ## what it does not tell you
 

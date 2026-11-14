@@ -10,7 +10,7 @@ keywords = ["stellar", "scp", "consensus", "light-client", "verification"]
 categories = ["cryptography", "command-line-utilities"]
 repository = "https://github.com/ipsadev/ipsa-scp-verifier"
 documentation = "https://docs.rs/ipsa-scp-verifier"
-exclude = ["tests/fixtures/*", "core-oracle/*", "target/*"]
+exclude = ["tests/fixtures/*", "target/*"]
 
 [workspace]
 members = ["tools"]
