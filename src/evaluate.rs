@@ -29,6 +29,7 @@ pub struct Report {
     pub scp_verified: bool,
     pub header_authenticated: bool,
     pub results_verified: bool,
+    pub strict_check_failed: bool,
     pub verdict: crate::error::Verdict,
     pub anchored: bool,
     pub next_slot_unavailable: Option<String>,
@@ -98,6 +99,26 @@ pub const MUTATIONS: [(&str, &str); 15] = [
     ("tampered-result-pairs", "result-set binding"),
     ("malicious-archive", "next-slot binding"),
 ];
+
+/// Whether core's `verify_update` itself must reject a mutation.
+///
+/// The ones that return `false` are not attacks on consensus or the header:
+/// core accepts them because a valid quorum still externalized the ledger (it
+/// uses a singleton quorum set for EXTERNALIZE, skips non-EXTERNALIZE
+/// statements, and keeps only the latest statement per node), or because the
+/// result set is not part of `verify_update` at all. ipsa's strict diagnostic
+/// and the result-set step catch those instead.
+pub fn core_must_reject(mutation: &str) -> bool {
+    !matches!(
+        mutation,
+        "duplicate-signer"
+            | "wrong-statement-type"
+            | "missing-quorum-set"
+            | "tampered-quorum-set"
+            | "zero-threshold-quorum-set"
+            | "tampered-result-pairs"
+    )
+}
 
 const STATEMENT_TYPE_OFFSET: usize = 44;
 const SCP_VALUE_OFFSET: usize = 75;
@@ -595,16 +616,21 @@ fn finish(
         .iter()
         .any(|s| s.step == CORE_STEP && s.passed && s.name == CORE_FULL);
 
+    let reimplementation_failed = steps_out
+        .iter()
+        .any(|s| s.step >= 1 && !s.passed && !s.skipped);
+
     let scp_verified = core_accepted;
     let header_authenticated = core_full;
     let results_verified = passed(8);
-    let anchored = input.trusted_previous_hash.is_some() && core_accepted;
+    let strict_check_failed = core_accepted && reimplementation_failed;
+    let anchored = input.trusted_previous_hash.is_some() && core_full;
 
     let failure_verdict = steps_out.iter().find_map(|step| step.verdict);
-    let verified = core_full;
+    let verified = core_full && !reimplementation_failed;
 
-    let verdict = if !core_accepted {
-        failure_verdict.unwrap_or(crate::error::Verdict::InvalidEvidence)
+    let verdict = if let Some(reported) = failure_verdict {
+        reported
     } else if core_full && anchored {
         crate::error::Verdict::Verified
     } else if core_full {
@@ -619,6 +645,7 @@ fn finish(
         scp_verified,
         header_authenticated,
         results_verified,
+        strict_check_failed,
         verdict,
         anchored,
         next_slot_unavailable: None,

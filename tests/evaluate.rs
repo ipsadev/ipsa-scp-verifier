@@ -1,9 +1,12 @@
 use std::path::Path;
 
 use ipsa_scp_verifier::error::Verdict;
-use ipsa_scp_verifier::evaluate::{apply_mutation, evaluate, NextSlot, MUTATIONS};
+use ipsa_scp_verifier::evaluate::{
+    apply_mutation, core_must_reject, evaluate, NextSlot, MUTATIONS,
+};
 use ipsa_scp_verifier::fixture::Fixture;
 use ipsa_scp_verifier::steps::{HeaderInput, QuorumConfig};
+use stellar_consensus_verifier::primitives::stellar::header::LedgerHeader;
 
 fn load() -> (HeaderInput, QuorumConfig, Vec<Vec<u8>>, Vec<u8>) {
     let fixture = Fixture::load(Path::new("tests/fixtures/mainnet-63907880.json")).unwrap();
@@ -26,6 +29,26 @@ fn run(
 ) -> ipsa_scp_verifier::evaluate::Report {
     evaluate(input, config, None, mutation.map(str::to_string))
 }
+
+fn load_full(
+    name: &str,
+) -> (
+    HeaderInput,
+    QuorumConfig,
+    ipsa_scp_verifier::fixture::NextSlot,
+) {
+    let fixture = Fixture::load(&Path::new("tests/fixtures").join(format!("{name}.json"))).unwrap();
+    let (input, next) = fixture.to_input().unwrap();
+    let config = QuorumConfig::from_xdr(&input.quorum_sets_xdr[0]).unwrap();
+
+    (
+        input,
+        config,
+        next.expect("fixture carries slot N+1 evidence"),
+    )
+}
+
+const FULL_PATH_FIXTURES: [&str; 2] = ["testnet-4160279", "testnet-5541000-protocol-30"];
 
 #[test]
 fn a_clean_ledger_passes_every_archive_verifiable_step() {
@@ -67,37 +90,6 @@ fn without_next_slot_evidence_a_clean_ledger_is_only_partial() {
     assert!(
         report.next_slot_unavailable.is_none(),
         "the library leaves the boundary-fetch reason for the server to set"
-    );
-}
-
-#[test]
-fn with_next_slot_evidence_a_clean_ledger_is_fully_verified() {
-    let (input, config, next_envelopes, next_tx_set) = load();
-    if next_tx_set.is_empty() {
-        return;
-    }
-
-    let report = evaluate(
-        &input,
-        &config,
-        Some(NextSlot {
-            envelopes_xdr: &next_envelopes,
-            quorum_sets_xdr: &input.quorum_sets_xdr,
-            tx_set_xdr: &next_tx_set,
-        }),
-        None,
-    );
-
-    assert!(report.scp_verified, "consensus should be verified");
-    assert!(
-        report.header_authenticated,
-        "the slot N+1 binding should authenticate the header: {:?}",
-        report.steps
-    );
-    assert!(
-        report.verified,
-        "expected a clean verify: {:?}",
-        report.steps
     );
 }
 
@@ -264,6 +256,116 @@ fn a_mutation_stops_the_run_at_the_failing_step() {
 
     assert_eq!(reimplementation.len(), 1);
     assert_eq!(reimplementation[0].step, 1);
+}
+
+#[test]
+fn every_mutation_on_the_full_path_is_caught_and_reported_consistently() {
+    for fixture in FULL_PATH_FIXTURES {
+        let (input, config, next) = load_full(fixture);
+
+        for (name, expected_step) in MUTATIONS {
+            if name == "tampered-result-pairs" && input.result_pairs_xdr.is_empty() {
+                continue;
+            }
+
+            let mutated = apply_mutation(name, &input).unwrap();
+            let config = mutated.config.clone().unwrap_or_else(|| config.clone());
+
+            let report = evaluate(
+                &mutated.input,
+                &config,
+                Some(NextSlot {
+                    envelopes_xdr: &next.envelopes_xdr,
+                    quorum_sets_xdr: &next.quorum_sets_xdr,
+                    tx_set_xdr: &next.tx_set_xdr,
+                }),
+                Some(name.to_string()),
+            );
+
+            assert!(
+                !report.verified,
+                "{fixture}/{name}: a run with a failing step must not report verified"
+            );
+
+            let core = report
+                .steps
+                .iter()
+                .find(|s| s.step == 0)
+                .expect("the report records the core acceptance step");
+
+            if core_must_reject(name) {
+                assert!(
+                    !core.passed,
+                    "{fixture}/{name}: core's verify_update must reject this attack"
+                );
+            } else {
+                assert!(
+                    core.passed,
+                    "{fixture}/{name}: core accepts this; ipsa's strict check catches it"
+                );
+                assert!(
+                    report.strict_check_failed,
+                    "{fixture}/{name}: the strict-check failure is not flagged"
+                );
+            }
+
+            assert!(
+                report
+                    .steps
+                    .iter()
+                    .any(|s| s.step >= 1 && s.name == expected_step && !s.passed && !s.skipped),
+                "{fixture}/{name}: the targeted step {expected_step} did not fail"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_clean_ledger_on_the_full_path_is_fully_verified() {
+    for fixture in FULL_PATH_FIXTURES {
+        let (input, config, next) = load_full(fixture);
+
+        let report = evaluate(
+            &input,
+            &config,
+            Some(NextSlot {
+                envelopes_xdr: &next.envelopes_xdr,
+                quorum_sets_xdr: &next.quorum_sets_xdr,
+                tx_set_xdr: &next.tx_set_xdr,
+            }),
+            None,
+        );
+
+        assert!(
+            report.verified,
+            "{fixture}: expected a clean full verify: {:?}",
+            report.steps
+        );
+        assert!(
+            report.header_authenticated,
+            "{fixture}: the header should be authenticated end to end"
+        );
+        assert!(
+            !report.strict_check_failed,
+            "{fixture}: unexpected strict-check failure"
+        );
+    }
+}
+
+#[test]
+fn a_value_bound_run_is_never_anchored_even_with_a_matching_trusted_previous() {
+    let (mut input, config, _, _) = load();
+
+    let header = LedgerHeader::decode(&input.ledger_header_xdr).unwrap();
+    input.trusted_previous_hash = Some(header.previous_ledger_hash);
+
+    let report = run(&input, &config, None);
+
+    assert!(
+        !report.anchored,
+        "a value-bound run authenticates no parent link; previous_ledger_hash is unsigned"
+    );
+    assert_eq!(report.verdict, Verdict::VerifiedPartial);
 }
 
 #[test]

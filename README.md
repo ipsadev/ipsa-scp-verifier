@@ -73,6 +73,8 @@ ipsa-scp-verify --serve 8110 --trust-root "$(cat trust-roots/mainnet.hex)" --cor
 
 a request may also carry `network`, `mutation`, `trust_root` (hex `SCPQuorumSet`) and `trusted_previous` (hex ledger hash). a request without `trust_root` uses the server's `--trust-root`, and only for the network the server was started on. with neither, the request is refused. `SCP_VERIFY_CORS_ORIGINS` (comma-separated) stands in for `--cors-origin`.
 
+when a request supplies its own `trust_root`, the verdict is relative to that caller-chosen root: the server pins whatever quorum set the caller sent (fingerprint = sha256 of the xdr), so a "verified" answer means "a quorum of the set *you* named signed this ledger", not that the set is the real network's. a caller that wants the server's assurance, not its own, should omit `trust_root` and rely on the server's `--trust-root`.
+
 the verdict is one of:
 
 - `verified` - every step passed and the header names the `trusted_previous` you supplied
