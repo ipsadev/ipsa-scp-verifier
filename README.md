@@ -1,170 +1,39 @@
-# ipsa-scp-verifier
+# ipsa-scp-verifier (archived)
 
-independently verify stellar scp consensus for a single ledger, step by step, from the public history archives.
+this repository is archived and no longer developed. the work that lived here has moved into dedicated crates, each published on crates.io. the published `ipsa-scp-verifier` crate stays on crates.io so existing builds keep working, but it will not get new releases.
 
-it answers one question: did a quorum of the validators *you* trust externalize this ledger, and is this `LedgerHeader` the one they agreed on? every check runs locally against signed scp envelopes. no horizon or rpc provider is trusted for evidence, and neither is the archive.
+## where it went
 
-## install
+the verifier was split along its two responsibilities: the audited consensus checker, and the tooling that feeds it evidence and reports on it.
 
-```sh
-cargo install ipsa-scp-verifier
-```
+- **[stellar-consensus-verifier](https://github.com/ipsadev/stellar-consensus-verifier)** (`stellar-consensus-verifier` on crates.io) is the audited core: a `no_std` library that verifies stellar scp consensus for a single ledger, with a typed front door (`verify_update`, `verify_header`, `verify_consensus`). this is the part on the critical path, and the one to depend on for verification.
+- **[scp-exporter](https://github.com/ipsadev/ipsa-tooling)** (`scp-exporter` on crates.io, in the ipsa-tooling workspace) reads evidence from the public history archives: the `archive`, `history`, and `network` modules that used to live behind this crate's `io` feature.
+- **[scp-verify](https://github.com/ipsadev/ipsa-tooling)** (`scp-verify` on crates.io, in ipsa-tooling) is the command line tool and http server, together with the step-by-step report (`evaluate`) and the checkpoint cache (`api`). it builds on stellar-consensus-verifier for the verification and on scp-exporter for the evidence, and installing it gives you the `scp-verify` binary that replaces `ipsa-scp-verify`.
+- **chain-check** (in the ipsa-tooling workspace) is the independent cross-check: a second implementation with its own xdr reader and its own cryptography, used to catch mistakes in the core verifier.
 
-that installs the `ipsa-scp-verify` binary. as a library, depend on it without the cli:
+## migrating
+
+replace the dependency:
 
 ```toml
+# before
 ipsa-scp-verifier = { version = "3", default-features = false }
+
+# after: the verifier itself
+stellar-consensus-verifier = "2"
+
+# and, if you read evidence from the archives, add
+scp-exporter = "0.1"
 ```
 
-the `io` feature adds archive access, `serve` adds the http server, and `cli` (the default) adds both plus the binary.
-
-## the trust root
-
-a quorum only means something relative to a set of validators you already trust. that set is the trust root: an `SCPQuorumSet`, hex-encoded xdr, passed with `--trust-root`.
-
-the verifier refuses to run without one. the archive carries quorum sets too, but those are pledged by the same validators whose signatures are being checked, so taking the trust root from there would let whoever writes the archive decide who counts as a quorum.
-
-build one from the validators you trust with the stellar cli:
+replace the command line tool:
 
 ```sh
-echo '{"threshold":2,"validators":["G...","G...","G..."],"inner_sets":[]}' \
-  | stellar xdr encode --type ScpQuorumSet --output single \
-  | xxd -p | tr -d '\n'
+# before
+cargo install ipsa-scp-verifier   # installs ipsa-scp-verify
+
+# after
+cargo install scp-verify          # installs scp-verify
 ```
 
-`trust-roots/mainnet.hex` is the set sdf's mainnet validators pledged at ledger 65468983: a threshold of seven of ten organisations. its fingerprint, the sha256 of the xdr you pin with `TrustRoot::from_pinned`, is `040355b75766e6799d1ef69ce03f114530a06d922dd64b5e885da907a453841d`. it is what `just live` uses. read it before you rely on it:
-
-```sh
-xxd -r -p trust-roots/mainnet.hex | stellar xdr decode --type ScpQuorumSet --input single --output json
-```
-
-## usage
-
-verify one mainnet ledger:
-
-```sh
-ipsa-scp-verify --ledger 65468983 --trust-root "$(cat trust-roots/mainnet.hex)"
-```
-
-add `--trusted-previous <hex>` with the hash of a ledger you already trust at N-1, and the header must name it as its predecessor. without it the ledger is verified as externalized, not as connected to a chain you trust. the verifier never takes N-1 from the archive for this.
-
-other modes:
-
-- `--negative` - after verifying, flip one field at a time and require each step to fail with the right error
-- `--network testnet` - read the testnet archive and use the testnet passphrase
-- `--archive <url or directory>` - read a different archive, or a local mirror
-- `--fixture <path>` / `--export <path>` - verify a frozen test vector offline, or write one out. an exported vector records the ledger's transaction results, so step 8 runs offline too; older vectors without them skip it
-- `--range FROM..TO` - verify every ledger in a range and classify each one instead of stopping at the first failure; `--jsonl <path>` writes one json row per ledger, and repeating `--archive` merges several archives. only `disagreement` is a finding: `invalid-evidence`, `incomplete-evidence`, `sub-quorum-evidence` and the rest describe the archive
-- `--range FROM..TO --scan` - only look for a validator externalizing two values for one slot. verifies nothing, so needs no trust root
-- `--range FROM..TO --audit` - check that every archived transaction set hashes to the `txSetHash` its header names, and exit non-zero if one does not. needs no trust root
-- `--raw off|sample|all` and `--list-signers false` - control how much of the evidence is printed
-
-`ipsa-scp-verify --help` lists everything.
-
-## the http server
-
-```sh
-ipsa-scp-verify --serve 8110 --trust-root "$(cat trust-roots/mainnet.hex)" --cors-origin https://example.org
-```
-
-- `GET /health`
-- `GET /mutations` - the names `mutation` accepts
-- `POST /verify` with `{"ledger": 65468983}` - returns a per-step report and a verdict
-
-a request may also carry `network`, `mutation`, `trust_root` (hex `SCPQuorumSet`) and `trusted_previous` (hex ledger hash). a request without `trust_root` uses the server's `--trust-root`, and only for the network the server was started on. with neither, the request is refused. `SCP_VERIFY_CORS_ORIGINS` (comma-separated) stands in for `--cors-origin`.
-
-when a request supplies its own `trust_root`, the verdict is relative to that caller-chosen root: the server pins whatever quorum set the caller sent (fingerprint = sha256 of the xdr), so a "verified" answer means "a quorum of the set *you* named signed this ledger", not that the set is the real network's. a caller that wants the server's assurance, not its own, should omit `trust_root` and rely on the server's `--trust-root`.
-
-the verdict is one of:
-
-- `verified` - every step passed and the header names the `trusted_previous` you supplied
-- `verified_unanchored` - every step passed, but no `trusted_previous` was given
-- `insufficient` - the evidence is well-formed but not enough: too few signers for your trust root, or a missing quorum-set preimage
-- `invalid_evidence` - an envelope or quorum set is malformed or badly signed. that is a problem with the archive's data, not a claim about the ledger
-- `contradicted` - well-formed, quorum-signed evidence disagrees with the header
-
-the server runs at most 4 verifications at once and answers 503 beyond that, gives each one 90 seconds before answering 504, and keeps the last 4 checkpoints it fetched in memory. it has no per-client rate limit, so put it behind something that has one before exposing it.
-
-## the steps
-
-- **fetch the evidence** - scp messages, ledger header and quorum sets for ledger N, from the public history archives
-- **check the signatures** - each envelope's ed25519 signature over `networkID ‖ xdr(ENVELOPE_TYPE_SCP) ‖ raw SCPStatement`
-- **check the statements** - all `EXTERNALIZE`, right slot, no node appearing twice
-- **check the quorum sets** - every signer's quorum set preimage hashes to the `commitQuorumSetHash` it signed
-- **find the quorum** - group signers by the value they pledged, then run stellar-core's `isQuorum` against your trust root
-- **check it's one value** - byte-for-byte across the group, ballot counters ignored
-- **tie it to the ledger** - that value is the header's `scpValue`, and `sha256(header)` is the ledger hash
-- **tie it to the next slot** - slot N+1's tx set hashes to what N+1 externalized, and names ledger N as its predecessor
-- **check the results** - the archived result pairs hash to `header.txSetResultHash`. a ledger with no archived results is checked as a ledger with no transactions, against the hash of the empty set
-
-two quorum predicates exist, and a ledger can pass one and fail the other. the report and the http server run `verify_externalized_quorum` - every signer's own published quorum set must itself ratify the value, the stricter check - and the step-4 `quorum check` line names it as the predicate behind the verdict. the full `verify_ledger` (the cli and the range sweep) then also runs `verify_header`, which re-derives the same value through stellar-core's ballot path (`confirm_commit`), so a ledger the cli accepts has passed both; `verify_header` on its own is the light-client subset, which drops the signers' own quorum sets and leans on the pinned trust root plus the quorum-intersection assumption.
-
-the archive is untrusted input throughout: downloads are capped at 256 MiB, gunzipped files at 1 GiB, xdr nesting at 500 levels, and no count read from a file is used to reserve memory.
-
-## testing
-
-```sh
-just ci     # fmt, clippy, tests, cargo audit
-just live   # verify a real mainnet ledger over the network
-```
-
-the quorum whitepaper oracle and the stellar-core differential now live in the core verifier
-(`stellar-consensus-verifier`), where they test its `is_quorum`, `is_quorum_slice` and `check_sane`
-directly, together with the `core-oracle/` harness that wraps a real stellar-core tree.
-
-`tools/src/crosscheck.rs` does the same trick at the other end - verifies a whole ledger a second time
-through a completely separate implementation, different xdr reader, `ring` instead of `sha2` +
-`ed25519-dalek`:
-
-```sh
-cargo run -p tools -- chain-check --network mainnet --ledger 65468983 --trust-root "$(cat trust-roots/mainnet.hex)"
-```
-
-`tests/differential.rs` covers the decoder: decode the fixtures with our hand-rolled reader and with
-`stellar-xdr`, assert they match. that includes the byte spans, which matters more than it sounds -
-signatures cover exact bytes, so an off-by-one in a span breaks every signature check without the
-output ever looking wrong.
-
-and `--negative` flips one field at a time to confirm each step actually fails when it should.
-
-## code map
-
-### `src/` - the verifier
-
-| file | what it does |
-|---|---|
-| `main.rs` | the `ipsa-scp-verify` binary: cli parsing, input assembly, and the whole printed report |
-| `steps.rs` | the verification steps, one function per check. `verify_ledger` runs them all; `verify_header` is the light client's subset, without the signers' own quorum sets |
-| `evaluate.rs` | the same steps as a structured per-step report with a verdict, for the http api |
-| `api.rs` | one http request to one report: resolve the trust root, load the checkpoint, evaluate |
-| `serve.rs` | the axum server behind `--serve` |
-| `sweep.rs` | range mode: fetch per checkpoint, merge envelopes across archives by node, classify every ledger instead of stopping at the first failure |
-| `audit.rs` | `--audit`: archived transaction sets against the headers that name them |
-| `negative.rs` | the single-mutation negative suite |
-| `error.rs` | `VerifyError` - one deterministic variant per way verification can fail |
-| `archive.rs` | history-archive access: checkpoint arithmetic, url construction, capped http get and gunzip, frame splitting |
-| `history.rs` | decoders for the archive wrappers the light client never sees, preserving raw byte spans |
-| `network.rs` | passphrases, `network_id = sha256(passphrase)`, and archive base urls, pinned per network |
-| `fixture.rs` | frozen test vectors: load, save, decode |
-| `report.rs` | terminal output, deliberately dependency-free |
-| `rawdump.rs` | field-by-field walk of each raw item for `--raw`. presentation only |
-| `strkey.rs` | `G…` account-id encoding so validators are named the way operators name them. presentation only |
-| `lib.rs` | module declarations, so the crate is usable as a library too |
-
-### `tools/` - separate workspace member, not a dependency of the binary
-
-| file | what it does |
-|---|---|
-| `crosscheck.rs` | the independent implementation behind `chain-check`, sharing no code and using `ring` |
-| `sync.rs` | `verify-sync`: diff or regenerate a vendored copy of the verifier's sources at `--target` |
-| `main.rs` | the task runner's cli |
-
-## what it does not tell you
-
-a passing run says a quorum of your trust root signed this ledger. safety also assumes quorum intersection
-among well-behaved nodes, which no light client can check for itself, and that you are intertwined with
-the network under the trust root you chose. that is an assumption, not a result.
-
-## license
-
-Copyright 2026 Amanda Gonsalves. Licensed under the [Apache License 2.0](LICENSE).
+the `--ledger` and `--trust-root` interface, and the trust-root rules the verifier enforces, are unchanged. see the scp-verify readme for current usage.
