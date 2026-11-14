@@ -3,8 +3,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     error::VerifyError,
-    steps::{self, HeaderInput, QuorumConfig},
+    steps::{self, Authentication, HeaderInput, QuorumConfig},
 };
+
+const CORE_STEP: usize = 0;
+const CORE_FULL: &str = "core acceptance (authenticated end to end)";
+const CORE_VALUE_BOUND: &str = "core acceptance (value-bound only)";
+const CORE_REJECTED: &str = "core acceptance";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StepResult {
@@ -304,6 +309,25 @@ pub fn evaluate(
         ..Evidence::default()
     };
 
+    let next_evidence = next
+        .as_ref()
+        .filter(|n| !n.tx_set_xdr.is_empty())
+        .map(|n| (n.envelopes_xdr, n.quorum_sets_xdr, n.tx_set_xdr));
+
+    match steps::authenticate_core(input, config, next_evidence) {
+        Ok((_, Authentication::Full)) => report(ok(
+            CORE_STEP,
+            CORE_FULL,
+            "verify_update authenticated the header end to end".into(),
+        )),
+        Ok((_, Authentication::ValueBound)) => report(ok(
+            CORE_STEP,
+            CORE_VALUE_BOUND,
+            "verify_header value-bound the header; no slot N+1 evidence".into(),
+        )),
+        Err(error) => report(failed(CORE_STEP, CORE_REJECTED, &error)),
+    }
+
     let mut envelopes = Vec::with_capacity(input.envelopes_xdr.len());
 
     for raw in &input.envelopes_xdr {
@@ -566,19 +590,27 @@ fn finish(
 ) -> Report {
     let passed = |step: usize| steps_out.iter().any(|s| s.step == step && s.passed);
 
-    let scp_verified = (1..=5).all(&passed);
-    let header_authenticated = passed(6) && passed(7);
+    let core_accepted = steps_out.iter().any(|s| s.step == CORE_STEP && s.passed);
+    let core_full = steps_out
+        .iter()
+        .any(|s| s.step == CORE_STEP && s.passed && s.name == CORE_FULL);
+
+    let scp_verified = core_accepted;
+    let header_authenticated = core_full;
     let results_verified = passed(8);
-    let anchored = input.trusted_previous_hash.is_some() && passed(6);
+    let anchored = input.trusted_previous_hash.is_some() && core_accepted;
 
     let failure_verdict = steps_out.iter().find_map(|step| step.verdict);
-    let verified = failure_verdict.is_none() && scp_verified && header_authenticated;
+    let verified = core_full;
 
-    let verdict = match failure_verdict {
-        Some(reported) => reported,
-        None if verified && anchored => crate::error::Verdict::Verified,
-        None if verified => crate::error::Verdict::VerifiedUnanchored,
-        None => crate::error::Verdict::VerifiedPartial,
+    let verdict = if !core_accepted {
+        failure_verdict.unwrap_or(crate::error::Verdict::InvalidEvidence)
+    } else if core_full && anchored {
+        crate::error::Verdict::Verified
+    } else if core_full {
+        crate::error::Verdict::VerifiedUnanchored
+    } else {
+        crate::error::Verdict::VerifiedPartial
     };
 
     Report {

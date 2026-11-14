@@ -107,7 +107,7 @@ fn the_report_names_every_step_in_order() {
     let report = run(&input, &config, None);
 
     let numbers: Vec<usize> = report.steps.iter().map(|s| s.step).collect();
-    assert_eq!(numbers, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(numbers, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
 }
 
 #[test]
@@ -158,18 +158,53 @@ fn every_mutation_fails_the_step_it_targets() {
 
         assert!(!report.verified, "{name} was accepted");
 
-        let failing: Vec<&ipsa_scp_verifier::evaluate::StepResult> = report
+        let reimpl_failing: Vec<&ipsa_scp_verifier::evaluate::StepResult> = report
             .steps
             .iter()
-            .filter(|s| !s.passed && !s.skipped)
+            .filter(|s| s.step >= 1 && !s.passed && !s.skipped)
             .collect();
 
-        assert_eq!(failing.len(), 1, "{name} failed {} steps", failing.len());
         assert_eq!(
-            failing[0].name, expected_step,
+            reimpl_failing.len(),
+            1,
+            "{name} failed {} reimplementation steps",
+            reimpl_failing.len()
+        );
+        assert_eq!(
+            reimpl_failing[0].name, expected_step,
             "{name} failed the wrong step"
         );
-        assert!(failing[0].error.is_some(), "{name} reported no error");
+        assert!(
+            reimpl_failing[0].error.is_some(),
+            "{name} reported no error"
+        );
+
+        assert!(
+            report.steps.iter().any(|s| s.step == 0),
+            "{name}: the report records the core acceptance step"
+        );
+    }
+}
+
+#[test]
+fn core_rejects_consensus_and_header_tampering() {
+    let (input, config, _, _) = load();
+
+    for name in ["tampered-signature", "wrong-network", "wrong-scp-value"] {
+        let mutated = apply_mutation(name, &input).unwrap();
+        let report = run(&mutated.input, &config, Some(name));
+
+        let core = report
+            .steps
+            .iter()
+            .find(|s| s.step == 0)
+            .expect("the report records the core acceptance step");
+
+        assert!(
+            !core.passed,
+            "{name}: core's verify_update must reject consensus or header tampering"
+        );
+        assert!(!report.verified, "{name} was accepted");
     }
 }
 
@@ -224,8 +259,11 @@ fn a_mutation_stops_the_run_at_the_failing_step() {
     let mutated = apply_mutation("tampered-signature", &input).unwrap();
     let report = run(&mutated.input, &config, Some("tampered-signature"));
 
-    assert_eq!(report.steps.len(), 1);
-    assert_eq!(report.steps[0].step, 1);
+    let reimplementation: Vec<&ipsa_scp_verifier::evaluate::StepResult> =
+        report.steps.iter().filter(|s| s.step >= 1).collect();
+
+    assert_eq!(reimplementation.len(), 1);
+    assert_eq!(reimplementation[0].step, 1);
 }
 
 #[test]
