@@ -3,13 +3,22 @@ use std::collections::BTreeMap;
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
-use crate::scp::ballot::{authenticate, confirmed_value, verify_signature, Authenticated};
-use crate::scp::envelope::{Envelope, Externalize};
-use crate::scp::error::ScpError;
-use crate::scp::ledger::{tx_set_hash_of_value, LedgerHeader};
-use crate::scp::quorum::{is_quorum, NodeId, QuorumSet};
-use crate::scp::results;
-use crate::scp::txset;
+use stellar_consensus_verifier::{
+    error::ScpError,
+    primitives::{
+        execution::results,
+        scp::{
+            commit::confirmed_value,
+            envelope::{authenticate, verify_signature, Authenticated, Envelope},
+            quorum::{is_quorum, NodeId, QuorumSet},
+            statement::Externalize,
+        },
+        stellar::{
+            header::{tx_set_hash_of_value, LedgerHeader},
+            txset,
+        },
+    },
+};
 
 use crate::error::VerifyError;
 
@@ -109,6 +118,13 @@ fn from_scp(error: ScpError, signers: usize) -> VerifyError {
         },
         ScpError::NoConfirmedCommit => VerifyError::InsufficientQuorum { signers },
         ScpError::ForkedConfirmCommit => VerifyError::ForkedQuorums { values: 2 },
+        ScpError::InputTooLarge { .. }
+        | ScpError::NetworkMismatch
+        | ScpError::SuccessorTxSetMismatch
+        | ScpError::TrustRootFingerprintMismatch
+        | ScpError::HeaderValueMismatch => VerifyError::Core {
+            detail: error.to_string(),
+        },
         _ => VerifyError::MalformedXdr {
             what: "SCP evidence".into(),
             detail: error.to_string(),

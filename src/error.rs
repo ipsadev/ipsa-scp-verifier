@@ -67,6 +67,8 @@ pub enum VerifyError {
         expected: String,
         computed: String,
     },
+    #[error("{detail}")]
+    Core { detail: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -104,7 +106,8 @@ impl VerifyError {
             | Self::InvalidPublicKey { .. }
             | Self::InvalidSignature { .. }
             | Self::InsaneQuorumSet { .. }
-            | Self::SignatureVerifierFailed { .. } => Verdict::InvalidEvidence,
+            | Self::SignatureVerifierFailed { .. }
+            | Self::Core { .. } => Verdict::InvalidEvidence,
             _ => Verdict::Contradicted,
         }
     }

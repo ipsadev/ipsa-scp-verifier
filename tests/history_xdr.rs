@@ -1,6 +1,5 @@
-use ipsa_scp_verifier::fixture::Fixture;
-use ipsa_scp_verifier::history::*;
-use ipsa_scp_verifier::scp::envelope::Envelope;
+use ipsa_scp_verifier::{fixture::Fixture, history::*};
+use stellar_consensus_verifier::primitives::scp::envelope::Envelope;
 
 fn fixture(name: &str) -> Fixture {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -1,4 +1,6 @@
-use ipsa_scp_verifier::scp::quorum::{is_quorum, is_quorum_slice, NodeId, QuorumSet};
+use stellar_consensus_verifier::primitives::scp::quorum::{
+    is_quorum, is_quorum_slice, NodeId, QuorumSet,
+};
 
 const MAX_NODES: usize = 8;
 const CASES: usize = 20_000;

@@ -1,10 +1,17 @@
-use crate::scp::envelope::{Ballot, Envelope, Externalize, Statement};
+use stellar_consensus_verifier::primitives::scp::{
+    ballot::Ballot,
+    envelope::Envelope,
+    quorum::{NodeId, QuorumSet},
+    statement::{Externalize, Statement},
+};
 
-use crate::error::VerifyError;
-use crate::steps::{
-    authenticate_evidence, index_quorum_sets, validate_externalize, verify_externalized_quorum,
-    verify_externalized_value, verify_ledger, verify_ledger_hash, verify_next_slot_binding,
-    verify_quorum_set_hashes, verify_result_set, verify_scp_header, HeaderInput, QuorumConfig,
+use crate::{
+    error::VerifyError,
+    steps::{
+        authenticate_evidence, index_quorum_sets, validate_externalize, verify_externalized_quorum,
+        verify_externalized_value, verify_ledger, verify_ledger_hash, verify_next_slot_binding,
+        verify_quorum_set_hashes, verify_result_set, verify_scp_header, HeaderInput, QuorumConfig,
+    },
 };
 
 pub struct NextSlotEvidence<'a> {
@@ -37,7 +44,7 @@ type Prepared = Result<Result<(), VerifyError>, String>;
 fn resolve_quorum_sets(
     input: &HeaderInput,
     quorum_sets_xdr: &[Vec<u8>],
-) -> Result<Vec<(crate::scp::quorum::NodeId, crate::scp::quorum::QuorumSet)>, VerifyError> {
+) -> Result<Vec<(NodeId, QuorumSet)>, VerifyError> {
     let envelopes = input
         .envelopes_xdr
         .iter()

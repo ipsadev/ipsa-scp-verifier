@@ -1,7 +1,11 @@
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+};
 
-use ipsa_scp_verifier::scp::quorum::{is_quorum, is_quorum_slice, NodeId, QuorumSet};
+use stellar_consensus_verifier::primitives::scp::quorum::{
+    is_quorum, is_quorum_slice, NodeId, QuorumSet,
+};
 
 const DEFAULT_CASES: usize = 2_000;
 const MAX_NODES: usize = 8;

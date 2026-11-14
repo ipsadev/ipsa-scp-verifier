@@ -1,17 +1,16 @@
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
-use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 
-use crate::archive::{self, checkpoint_for, next_checkpoint, CHECKPOINT_FREQUENCY};
-use crate::error::{Verdict, VerifyError};
-use crate::history::{self, ArchivedEnvelope, HeaderHistoryEntry, ScpHistoryEntry};
-use crate::network::Network;
-use crate::report;
-use crate::scp::envelope::Envelope;
-use crate::steps::{self, HeaderInput, QuorumConfig};
+use crate::{
+    archive::{self, checkpoint_for, next_checkpoint, CHECKPOINT_FREQUENCY},
+    error::{Error, Result, Verdict, VerifyError},
+    history::{self, ArchivedEnvelope, HeaderHistoryEntry, ScpHistoryEntry},
+    network::Network,
+    report,
+    steps::{self, HeaderInput, QuorumConfig},
+};
+use stellar_consensus_verifier::primitives::scp::envelope::Envelope;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Outcome {

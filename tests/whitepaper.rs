@@ -1,8 +1,13 @@
-use ipsa_scp_verifier::error::VerifyError;
-use ipsa_scp_verifier::scp::quorum::{is_quorum_slice, NodeId, QuorumSet};
-use ipsa_scp_verifier::steps::{verify_externalized_value, verify_quorum, QuorumConfig};
-
-use ipsa_scp_verifier::scp::envelope::{Ballot, Envelope, Externalize, Statement};
+use ipsa_scp_verifier::{
+    error::VerifyError,
+    steps::{verify_externalized_value, verify_quorum, QuorumConfig},
+};
+use stellar_consensus_verifier::primitives::scp::{
+    ballot::Ballot,
+    envelope::Envelope,
+    quorum::{is_quorum_slice, NodeId, QuorumSet},
+    statement::{Externalize, Statement},
+};
 
 fn node(seed: u8) -> NodeId {
     [seed; 32]

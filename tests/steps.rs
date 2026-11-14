@@ -1,5 +1,4 @@
-use ipsa_scp_verifier::error::VerifyError;
-use ipsa_scp_verifier::steps::*;
+use ipsa_scp_verifier::{error::VerifyError, steps::*};
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -107,12 +106,15 @@ fn signer_set(
     ids: &[[u8; 32]],
     among: &[[u8; 32]],
     threshold: u32,
-) -> Vec<([u8; 32], ipsa_scp_verifier::scp::quorum::QuorumSet)> {
+) -> Vec<(
+    [u8; 32],
+    stellar_consensus_verifier::primitives::scp::quorum::QuorumSet,
+)> {
     ids.iter()
         .map(|id| {
             (
                 *id,
-                ipsa_scp_verifier::scp::quorum::QuorumSet {
+                stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
                     threshold,
                     validators: among.to_vec(),
                     inner_sets: Vec::new(),
@@ -122,13 +124,16 @@ fn signer_set(
         .collect()
 }
 
-fn envelope_with(node_id: [u8; 32], value: &[u8]) -> ipsa_scp_verifier::scp::envelope::Envelope {
-    ipsa_scp_verifier::scp::envelope::Envelope {
+fn envelope_with(
+    node_id: [u8; 32],
+    value: &[u8],
+) -> stellar_consensus_verifier::primitives::scp::envelope::Envelope {
+    stellar_consensus_verifier::primitives::scp::envelope::Envelope {
         node_id,
         slot_index: 1,
-        statement: ipsa_scp_verifier::scp::envelope::Statement::Externalize(
-            ipsa_scp_verifier::scp::envelope::Externalize {
-                commit: ipsa_scp_verifier::scp::envelope::Ballot {
+        statement: stellar_consensus_verifier::primitives::scp::statement::Statement::Externalize(
+            stellar_consensus_verifier::primitives::scp::statement::Externalize {
+                commit: stellar_consensus_verifier::primitives::scp::ballot::Ballot {
                     counter: 1,
                     value: value.to_vec(),
                 },
@@ -181,16 +186,16 @@ fn two_quorum_backed_values_are_reported_as_fork_evidence() {
     let b = [[3u8; 32], [4u8; 32]];
 
     let split_root = QuorumConfig {
-        local: ipsa_scp_verifier::scp::quorum::QuorumSet {
+        local: stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
             threshold: 1,
             validators: Vec::new(),
             inner_sets: vec![
-                ipsa_scp_verifier::scp::quorum::QuorumSet {
+                stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
                     threshold: 2,
                     validators: a.to_vec(),
                     inner_sets: Vec::new(),
                 },
-                ipsa_scp_verifier::scp::quorum::QuorumSet {
+                stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
                     threshold: 2,
                     validators: b.to_vec(),
                     inner_sets: Vec::new(),

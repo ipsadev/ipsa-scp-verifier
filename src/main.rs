@@ -1,23 +1,25 @@
 use std::collections::BTreeMap;
 
 use clap::Parser;
-use ipsa_scp_verifier::error::{Error, Result};
-
-use ipsa_scp_verifier::archive::{self, checkpoint_for};
-use ipsa_scp_verifier::audit;
-use ipsa_scp_verifier::fixture::{self, Fixture, NextSlot};
-use ipsa_scp_verifier::history::{self, ScpHistoryEntry};
-use ipsa_scp_verifier::negative::{self, Outcome};
-use ipsa_scp_verifier::network::Network;
-use ipsa_scp_verifier::rawdump;
-use ipsa_scp_verifier::report;
-use ipsa_scp_verifier::scp::envelope::Envelope;
-use ipsa_scp_verifier::scp::ledger::tx_set_hash_of_value;
-use ipsa_scp_verifier::scp::quorum::{NodeId, QuorumSet};
-use ipsa_scp_verifier::serve;
-use ipsa_scp_verifier::steps::{self, Externalized, HeaderInput, QuorumConfig, VerifiedLedger};
-use ipsa_scp_verifier::strkey;
-use ipsa_scp_verifier::sweep;
+use ipsa_scp_verifier::{
+    archive::{self, checkpoint_for},
+    audit,
+    error::{Error, Result},
+    fixture::{self, Fixture, NextSlot},
+    history::{self, ScpHistoryEntry},
+    negative::{self, Outcome},
+    network::Network,
+    rawdump, report, serve,
+    steps::{self, Externalized, HeaderInput, QuorumConfig, VerifiedLedger},
+    strkey, sweep,
+};
+use stellar_consensus_verifier::primitives::{
+    scp::{
+        envelope::Envelope,
+        quorum::{NodeId, QuorumSet},
+    },
+    stellar::header::tx_set_hash_of_value,
+};
 
 const TOTAL_STEPS: usize = 8;
 

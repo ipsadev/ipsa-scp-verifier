@@ -3,7 +3,6 @@ pub mod evaluate;
 pub mod history;
 pub mod negative;
 pub mod network;
-pub use stellar_consensus_verifier as scp;
 pub mod steps;
 pub mod strkey;
 
