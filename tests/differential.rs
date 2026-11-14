@@ -1,9 +1,10 @@
 use std::io::Cursor;
 
 use ipsa_scp_verifier::fixture::Fixture;
-use ipsa_scp_verifier::scp::envelope::Envelope;
-use ipsa_scp_verifier::scp::ledger::LedgerHeader;
-use ipsa_scp_verifier::scp::quorum::QuorumSet;
+use stellar_consensus_verifier::primitives::{
+    scp::{envelope::Envelope, quorum::QuorumSet},
+    stellar::header::LedgerHeader,
+};
 
 use stellar_xdr::{Limited, Limits, ReadXdr};
 

@@ -1,8 +1,10 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::error::VerifyError;
-use crate::steps::{self, HeaderInput, QuorumConfig};
+use crate::{
+    error::VerifyError,
+    steps::{self, HeaderInput, QuorumConfig},
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StepResult {
@@ -40,7 +42,7 @@ pub struct QuorumSetView {
 }
 
 impl QuorumSetView {
-    fn of(set: &crate::scp::quorum::QuorumSet) -> Self {
+    fn of(set: &stellar_consensus_verifier::primitives::scp::quorum::QuorumSet) -> Self {
         Self {
             threshold: set.threshold,
             validators: set
@@ -216,7 +218,10 @@ pub fn apply_mutation(name: &str, input: &HeaderInput) -> Result<Mutated, String
         )?,
         "tampered-ledger-header" => flip_last(&mut output.ledger_header_xdr, "the ledger header")?,
         "malicious-archive" => {
-            let header = crate::scp::ledger::LedgerHeader::decode(&output.ledger_header_xdr)
+            let header =
+                stellar_consensus_verifier::primitives::stellar::header::LedgerHeader::decode(
+                    &output.ledger_header_xdr,
+                )
                 .map_err(|error| format!("decoding the ledger header: {error}"))?;
             let position = output
                 .ledger_header_xdr

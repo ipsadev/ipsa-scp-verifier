@@ -32,7 +32,7 @@ echo '{"threshold":2,"validators":["G...","G...","G..."],"inner_sets":[]}' \
   | xxd -p | tr -d '\n'
 ```
 
-`trust-roots/mainnet.hex` is the set sdf's mainnet validators pledged at ledger 63907880: five of seven organisations, two of three validators each. it is what `just live` uses. read it before you rely on it:
+`trust-roots/mainnet.hex` is the set sdf's mainnet validators pledged at ledger 65468983: a threshold of seven of ten organisations. its fingerprint, the sha256 of the xdr you pin with `TrustRoot::from_pinned`, is `040355b75766e6799d1ef69ce03f114530a06d922dd64b5e885da907a453841d`. it is what `just live` uses. read it before you rely on it:
 
 ```sh
 xxd -r -p trust-roots/mainnet.hex | stellar xdr decode --type ScpQuorumSet --input single --output json
@@ -43,7 +43,7 @@ xxd -r -p trust-roots/mainnet.hex | stellar xdr decode --type ScpQuorumSet --inp
 verify one mainnet ledger:
 
 ```sh
-ipsa-scp-verify --ledger 63907880 --trust-root "$(cat trust-roots/mainnet.hex)"
+ipsa-scp-verify --ledger 65468983 --trust-root "$(cat trust-roots/mainnet.hex)"
 ```
 
 add `--trusted-previous <hex>` with the hash of a ledger you already trust at N-1, and the header must name it as its predecessor. without it the ledger is verified as externalized, not as connected to a chain you trust. the verifier never takes N-1 from the archive for this.
@@ -69,7 +69,7 @@ ipsa-scp-verify --serve 8110 --trust-root "$(cat trust-roots/mainnet.hex)" --cor
 
 - `GET /health`
 - `GET /mutations` - the names `mutation` accepts
-- `POST /verify` with `{"ledger": 63907880}` - returns a per-step report and a verdict
+- `POST /verify` with `{"ledger": 65468983}` - returns a per-step report and a verdict
 
 a request may also carry `network`, `mutation`, `trust_root` (hex `SCPQuorumSet`) and `trusted_previous` (hex ledger hash). a request without `trust_root` uses the server's `--trust-root`, and only for the network the server was started on. with neither, the request is refused. `SCP_VERIFY_CORS_ORIGINS` (comma-separated) stands in for `--cors-origin`.
 
@@ -124,7 +124,7 @@ through a completely separate implementation, different xdr reader, `ring` inste
 `ed25519-dalek`:
 
 ```sh
-cargo run -p tools -- chain-check --network mainnet --ledger 63907880 --trust-root "$(cat trust-roots/mainnet.hex)"
+cargo run -p tools -- chain-check --network mainnet --ledger 65468983 --trust-root "$(cat trust-roots/mainnet.hex)"
 ```
 
 `tests/differential.rs` covers the decoder: decode the fixtures with our hand-rolled reader and with
