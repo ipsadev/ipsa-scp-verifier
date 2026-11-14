@@ -513,7 +513,7 @@ fn no_value_is_quorum_backed(
         }
     }
 
-    verify_externalized_quorum(config, &signers, &mutated).map(|_| ())
+    verify_externalized_quorum(&config.local, &signers, &mutated).map(|_| ())
 }
 
 fn synthetic_envelope(node_id: [u8; 32], value: Vec<u8>) -> Envelope {

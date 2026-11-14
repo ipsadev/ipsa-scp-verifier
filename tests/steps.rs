@@ -1,5 +1,6 @@
 use ipsa_scp_verifier::{error::VerifyError, steps::*};
 use sha2::{Digest, Sha256};
+use stellar_consensus_verifier::primitives::scp::quorum::QuorumSet;
 
 #[test]
 fn signing_payload_is_network_then_type_then_statement() {
@@ -91,7 +92,7 @@ fn ledger_hash_is_sha256_of_the_header_alone() {
     ));
 }
 
-fn qc(threshold: u32, validators: &[[u8; 32]]) -> QuorumConfig {
+fn qc(threshold: u32, validators: &[[u8; 32]]) -> QuorumSet {
     let mut raw = threshold.to_be_bytes().to_vec();
     raw.extend_from_slice(&(validators.len() as u32).to_be_bytes());
     for v in validators {
@@ -99,7 +100,7 @@ fn qc(threshold: u32, validators: &[[u8; 32]]) -> QuorumConfig {
         raw.extend_from_slice(v);
     }
     raw.extend_from_slice(&0u32.to_be_bytes());
-    QuorumConfig::from_xdr(&raw).expect("sane trust root")
+    QuorumConfig::from_xdr(&raw).expect("sane trust root").local
 }
 
 fn signer_set(
@@ -185,24 +186,21 @@ fn two_quorum_backed_values_are_reported_as_fork_evidence() {
     let a = [[1u8; 32], [2u8; 32]];
     let b = [[3u8; 32], [4u8; 32]];
 
-    let split_root = QuorumConfig {
-        local: stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
-            threshold: 1,
-            validators: Vec::new(),
-            inner_sets: vec![
-                stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
-                    threshold: 2,
-                    validators: a.to_vec(),
-                    inner_sets: Vec::new(),
-                },
-                stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
-                    threshold: 2,
-                    validators: b.to_vec(),
-                    inner_sets: Vec::new(),
-                },
-            ],
-        },
-        raw: Vec::new(),
+    let split_root = stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
+        threshold: 1,
+        validators: Vec::new(),
+        inner_sets: vec![
+            stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
+                threshold: 2,
+                validators: a.to_vec(),
+                inner_sets: Vec::new(),
+            },
+            stellar_consensus_verifier::primitives::scp::quorum::QuorumSet {
+                threshold: 2,
+                validators: b.to_vec(),
+                inner_sets: Vec::new(),
+            },
+        ],
     };
 
     let mut signers = signer_set(&a, &a, 2);
