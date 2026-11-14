@@ -652,6 +652,47 @@ pub fn authenticate_core(
     Ok((verified, authentication))
 }
 
+pub fn walk_back_to(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    next: SuccessorEvidence<'_>,
+    headers_descending: &[Vec<u8>],
+    target_seq: u32,
+) -> Result<VerifiedLedger> {
+    let (successor_envelopes_xdr, successor_quorum_sets_xdr, successor_tx_set_xdr) = next;
+
+    let anchor = verify::verify_update(
+        &config.trust_root,
+        &UpdateEvidence {
+            network_id: &input.network_id,
+            slot: input.slot,
+            header_xdr: &input.ledger_header_xdr,
+            envelopes_xdr: &input.envelopes_xdr,
+            quorum_sets_xdr: &input.quorum_sets_xdr,
+            successor_envelopes_xdr,
+            successor_quorum_sets_xdr,
+            successor_tx_set_xdr,
+        },
+    )
+    .map_err(|error| from_scp(error, input.envelopes_xdr.len()))?;
+
+    let header_refs: Vec<&[u8]> = headers_descending.iter().map(Vec::as_slice).collect();
+
+    let target = verify::walk_back(&anchor, &header_refs, target_seq)
+        .map_err(|error| from_scp(error, input.envelopes_xdr.len()))?;
+
+    let header = target.header();
+
+    Ok(VerifiedLedger {
+        slot: header.ledger_seq as u64,
+        ledger_hash: header.ledger_hash,
+        close_time: header.close_time,
+        tx_set_result_hash: header.tx_set_result_hash,
+        bucket_list_hash: header.bucket_list_hash,
+        previous_ledger_hash: header.previous_ledger_hash,
+    })
+}
+
 pub fn describe_quorum_set(quorum_set: &QuorumSet) -> String {
     let entries = quorum_set.validators.len() + quorum_set.inner_sets.len();
 

@@ -94,6 +94,13 @@ struct Cli {
     trusted_previous: Option<String>,
     #[arg(
         long,
+        value_name = "SEQUENCE",
+        conflicts_with_all = ["fixture", "range", "export", "negative"],
+        help = "After authenticating this ledger with slot N+1, walk the header chain back to confirm SEQUENCE is an ancestor"
+    )]
+    walk_back_to: Option<u32>,
+    #[arg(
+        long,
         value_name = "FROM..TO",
         conflicts_with_all = ["ledger", "fixture", "export", "negative"],
         help = "Verify every ledger in a range, classifying each one instead of stopping at the first failure"
@@ -228,7 +235,10 @@ async fn run(args: Cli) -> Result<()> {
     }
 
     let config = trust_root(trust_root_xdr.as_deref())?;
-    let (mut input, next, source, results_recorded) = match (&args.fixture, args.ledger) {
+    let (mut input, next, source, results_recorded, walk_back_headers) = match (
+        &args.fixture,
+        args.ledger,
+    ) {
         (Some(path), _) => {
             report::step("loading a frozen test vector");
             report::explain(
@@ -271,16 +281,18 @@ async fn run(args: Cli) -> Result<()> {
                 next,
                 format!("fixture {}", path.display()),
                 fixture.result_pairs_xdr.is_some(),
+                Vec::new(),
             )
         }
 
         (None, Some(ledger)) => {
-            let (input, next) = from_archive(
+            let (input, next, walk_back_headers) = from_archive(
                 &archives(&args, network),
                 network,
                 ledger,
                 args.next_slot,
                 args.results,
+                args.walk_back_to,
             )
             .await?;
 
@@ -289,6 +301,7 @@ async fn run(args: Cli) -> Result<()> {
                 next,
                 format!("{} history archive", network.label()),
                 args.results,
+                walk_back_headers,
             )
         }
 
@@ -324,6 +337,10 @@ async fn run(args: Cli) -> Result<()> {
         args.list_signers,
         results_requested,
     )?;
+
+    if let Some(target) = args.walk_back_to {
+        walk_back_and_report(&input, &config, next.as_ref(), &walk_back_headers, target)?;
+    }
 
     if let Some(path) = &args.export {
         report::step("exporting a test vector");
@@ -422,7 +439,8 @@ async fn from_archive(
     ledger: u32,
     want_next: bool,
     want_results: bool,
-) -> Result<(HeaderInput, Option<NextSlot>)> {
+    walk_back_target: Option<u32>,
+) -> Result<(HeaderInput, Option<NextSlot>, Vec<Vec<u8>>)> {
     let base = bases.first().map_or(network.archive_base(), String::as_str);
 
     if bases.len() > 1 {
@@ -497,9 +515,28 @@ async fn from_archive(
         .map(history::read_header_history_entry)
         .collect::<Result<Vec<_>>>()?;
     let header_entry = archived_headers
-        .into_iter()
+        .iter()
         .find(|header| header.ledger_seq == ledger)
+        .cloned()
         .ok_or(Error::NoLedgerHeader { ledger })?;
+
+    let walk_back_headers = match walk_back_target {
+        Some(target) => {
+            let mut chain = Vec::new();
+
+            for seq in (target..ledger).rev() {
+                let older = archived_headers
+                    .iter()
+                    .find(|header| header.ledger_seq == seq)
+                    .ok_or(Error::NoLedgerHeader { ledger: seq })?;
+
+                chain.push(older.header_xdr.clone());
+            }
+
+            chain
+        }
+        None => Vec::new(),
+    };
 
     report::ok(&format!(
         "ledger {ledger}: header of {} bytes, archive records its hash as {}",
@@ -573,7 +610,7 @@ async fn from_archive(
         None
     };
 
-    Ok((input, next))
+    Ok((input, next, walk_back_headers))
 }
 
 async fn check_published(base: &str, ledger: u32, checkpoint: u32) -> Result<()> {
@@ -915,6 +952,51 @@ fn verify_and_report(
     );
 
     Ok(authoritative)
+}
+
+fn walk_back_and_report(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    next: Option<&NextSlot>,
+    headers_descending: &[Vec<u8>],
+    target: u32,
+) -> Result<()> {
+    report::step("walking the header chain back to an older ledger");
+    report::explain(
+        "is the target ledger a genuine ancestor of this authenticated one?",
+        "from the authenticated anchor, follow each header's previousLedgerHash down to the target",
+    );
+
+    let Some(n) = next else {
+        report::warn(
+            "skipped - walking back needs slot N+1 evidence to authenticate the anchor first; \
+             re-run with --next-slot",
+        );
+
+        return Ok(());
+    };
+
+    let evidence = (
+        n.envelopes_xdr.as_slice(),
+        n.quorum_sets_xdr.as_slice(),
+        n.tx_set_xdr.as_slice(),
+    );
+
+    let target_ledger = steps::walk_back_to(input, config, evidence, headers_descending, target)?;
+
+    report::ok(&format!(
+        "ledger {target} is a genuine ancestor of ledger {}, reached over {} header(s)",
+        input.slot,
+        headers_descending.len()
+    ));
+    report::field("ledgerHash", &hex::encode(target_ledger.ledger_hash));
+    report::field("closeTime", &target_ledger.close_time.to_string());
+    report::field(
+        "previousLedgerHash",
+        &hex::encode(target_ledger.previous_ledger_hash),
+    );
+
+    Ok(())
 }
 
 fn check_core_authority(
