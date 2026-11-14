@@ -10,7 +10,7 @@ use ipsa_scp_verifier::{
     negative::{self, Outcome},
     network::Network,
     rawdump, report, serve,
-    steps::{self, Externalized, HeaderInput, QuorumConfig, VerifiedLedger},
+    steps::{self, Authentication, Externalized, HeaderInput, QuorumConfig, VerifiedLedger},
     strkey, sweep,
 };
 use stellar_consensus_verifier::primitives::{
@@ -904,9 +904,71 @@ fn verify_and_report(
 
     check_next_slot(input, config, next, &verified)?;
     check_results(input, &verified, results_requested)?;
-    report_verdict(next.is_some(), results_requested, &verified, signers.len());
 
-    Ok(verified)
+    let (authoritative, authentication) = check_core_authority(input, config, next, &verified)?;
+
+    report_verdict(
+        authentication,
+        results_requested,
+        &authoritative,
+        signers.len(),
+    );
+
+    Ok(authoritative)
+}
+
+fn check_core_authority(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    next: Option<&NextSlot>,
+    reimplementation: &VerifiedLedger,
+) -> Result<(VerifiedLedger, Authentication)> {
+    report::step("core acceptance (stellar-consensus-verifier)");
+    report::explain(
+        "does the audited core verifier accept this ledger from the same bytes?",
+        "verify_update when slot N+1 evidence is present, else verify_header (value-bound only); \
+         core is the authority, the steps above are ipsa's independent cross-check",
+    );
+
+    let next_evidence = next.map(|n| {
+        (
+            n.envelopes_xdr.as_slice(),
+            n.quorum_sets_xdr.as_slice(),
+            n.tx_set_xdr.as_slice(),
+        )
+    });
+
+    let (authoritative, authentication) = steps::authenticate_core(input, config, next_evidence)?;
+
+    match authentication {
+        Authentication::Full => {
+            report::ok("core verify_update authenticated the header end to end")
+        }
+        Authentication::ValueBound => {
+            report::ok("core verify_header value-bound the header; no slot N+1 evidence was given")
+        }
+    }
+
+    if authoritative == *reimplementation {
+        report::detail("core and ipsa's independent reimplementation agree");
+    } else {
+        report::warn(
+            "core and ipsa's reimplementation disagree on the verified ledger - this is a bug in \
+             one of them, not an archive property",
+        );
+        report::detail(&format!(
+            "ipsa: ledgerHash {}, txSetResultHash {}",
+            hex::encode(reimplementation.ledger_hash),
+            hex::encode(reimplementation.tx_set_result_hash)
+        ));
+        report::detail(&format!(
+            "core: ledgerHash {}, txSetResultHash {}",
+            hex::encode(authoritative.ledger_hash),
+            hex::encode(authoritative.tx_set_result_hash)
+        ));
+    }
+
+    Ok((authoritative, authentication))
 }
 
 fn report_inputs(input: &HeaderInput, config: &QuorumConfig, list_signers: bool) {
@@ -1045,7 +1107,7 @@ fn check_quorum(
          by the survivors, repeat to a fixed point, then ask whether the trust root has a slice \
          among what is left",
     );
-    let externalized = steps::verify_externalized_quorum(config, signers, envelopes)?;
+    let externalized = steps::verify_externalized_quorum(&config.local, signers, envelopes)?;
 
     report::ok(&format!(
         "isQuorum = true for the {} signer(s) against the trust root",
@@ -1195,7 +1257,7 @@ fn check_next_slot(
             let next_preimages = steps::index_quorum_sets(&n.quorum_sets_xdr)?;
             let next_signers = steps::verify_quorum_set_hashes(&next_envelopes, &next_preimages)?;
             let next_externalized =
-                steps::verify_externalized_quorum(config, &next_signers, &next_envelopes)?;
+                steps::verify_externalized_quorum(&config.local, &next_signers, &next_envelopes)?;
 
             report::ok(&format!(
                 "slot {next_slot}: quorum-set hashes resolve and isQuorum = true ({} signers)",
@@ -1279,21 +1341,25 @@ fn check_results(
 }
 
 fn report_verdict(
-    has_next_slot: bool,
+    authentication: Authentication,
     results_checked: bool,
     verified: &VerifiedLedger,
     signers: usize,
 ) {
-    report::hint(match (has_next_slot, results_checked) {
-        (true, true) => "VERIFIED - all 8 steps passed",
-        (true, false) => "VERIFIED - steps 1-7 passed, step 8 skipped",
-        (false, true) => {
-            "VERIFIED (PARTIAL) - steps 1-6 and 8 passed, step 7 skipped; the header was not \
-             authenticated"
+    report::hint(match (authentication, results_checked) {
+        (Authentication::Full, true) => {
+            "VERIFIED - core authenticated the header end to end; all checks passed"
         }
-        (false, false) => {
-            "VERIFIED (PARTIAL) - steps 1-6 passed, steps 7 and 8 skipped; the header was not \
-             authenticated"
+        (Authentication::Full, false) => {
+            "VERIFIED - core authenticated the header end to end; result-set check skipped"
+        }
+        (Authentication::ValueBound, true) => {
+            "VERIFIED (value-bound only) - no slot N+1 evidence, so txSetResultHash and \
+             bucketListHash are NOT authenticated; the agreed value and its result set are"
+        }
+        (Authentication::ValueBound, false) => {
+            "VERIFIED (value-bound only) - no slot N+1 evidence, so txSetResultHash and \
+             bucketListHash are NOT authenticated; result-set check skipped"
         }
     });
     report::field("slot", &verified.slot.to_string());

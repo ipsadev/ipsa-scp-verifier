@@ -376,7 +376,8 @@ pub fn evaluate(
             preimages.len()
         ),
     ));
-    let externalized = match steps::verify_externalized_quorum(config, &signers, &envelopes) {
+    let externalized = match steps::verify_externalized_quorum(&config.local, &signers, &envelopes)
+    {
         Ok(externalized) => externalized,
         Err(error) => {
             report(failed(4, "quorum check", &error));
@@ -551,7 +552,7 @@ fn next_envelopes(input: &HeaderInput, config: &QuorumConfig) -> Result<Vec<u8>,
     let preimages = steps::index_quorum_sets(&input.quorum_sets_xdr)?;
     let signers = steps::verify_quorum_set_hashes(&envelopes, &preimages)?;
 
-    steps::verify_externalized_quorum(config, &signers, &envelopes)
+    steps::verify_externalized_quorum(&config.local, &signers, &envelopes)
         .map(|externalized| externalized.value)
 }
 

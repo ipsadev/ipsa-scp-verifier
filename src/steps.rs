@@ -18,6 +18,7 @@ use stellar_consensus_verifier::{
             txset,
         },
     },
+    verify::{self, TrustRoot, UpdateEvidence},
 };
 
 use crate::error::VerifyError;
@@ -46,10 +47,19 @@ pub struct HeaderInput {
     pub trusted_previous_hash: Option<[u8; 32]>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Authentication {
+    Full,
+    ValueBound,
+}
+
+pub type SuccessorEvidence<'a> = (&'a [Vec<u8>], &'a [Vec<u8>], &'a [u8]);
+
 #[derive(Clone, Debug)]
 pub struct QuorumConfig {
     pub local: QuorumSet,
     pub raw: Vec<u8>,
+    pub trust_root: TrustRoot,
 }
 
 impl QuorumConfig {
@@ -71,9 +81,18 @@ impl QuorumConfig {
                 detail: error.to_string(),
             })?;
 
+        let fingerprint: [u8; 32] = Sha256::digest(bytes).into();
+
+        let trust_root = TrustRoot::from_pinned(bytes, &fingerprint).map_err(|error| {
+            VerifyError::InsaneQuorumSet {
+                detail: error.to_string(),
+            }
+        })?;
+
         Ok(Self {
             local,
             raw: bytes.to_vec(),
+            trust_root,
         })
     }
 }
@@ -297,15 +316,12 @@ pub fn verify_quorum_set_hashes(
     Ok(output)
 }
 
-pub fn verify_quorum(
-    config: &QuorumConfig,
-    signers: &[(NodeId, QuorumSet)],
-) -> Result<Vec<NodeId>> {
+pub fn verify_quorum(local: &QuorumSet, signers: &[(NodeId, QuorumSet)]) -> Result<Vec<NodeId>> {
     if signers.is_empty() {
         return Err(VerifyError::NoEnvelopes);
     }
 
-    if !is_quorum(&config.local, signers) {
+    if !is_quorum(local, signers) {
         return Err(VerifyError::InsufficientQuorum {
             signers: signers.len(),
         });
@@ -326,7 +342,7 @@ pub struct Externalized {
 }
 
 pub fn verify_externalized_quorum(
-    config: &QuorumConfig,
+    local: &QuorumSet,
     signers: &[(NodeId, QuorumSet)],
     envelopes: &[Envelope],
 ) -> Result<Externalized> {
@@ -351,7 +367,7 @@ pub fn verify_externalized_quorum(
     let mut backed: Option<&ValueGroup> = None;
 
     for group in &groups {
-        if is_quorum(&config.local, &group.members) {
+        if is_quorum(local, &group.members) {
             if backed.is_some() {
                 return Err(VerifyError::ForkedQuorums {
                     values: groups.len(),
@@ -539,7 +555,7 @@ pub fn verify_ledger(input: &HeaderInput, config: &QuorumConfig) -> Result<Verif
     let preimages = index_quorum_sets(&input.quorum_sets_xdr)?;
     let signers = verify_quorum_set_hashes(&envelopes, &preimages)?;
 
-    verify_externalized_quorum(config, &signers, &envelopes)?;
+    verify_externalized_quorum(&config.local, &signers, &envelopes)?;
 
     verify_header(input, config)
 }
@@ -570,6 +586,70 @@ pub fn verify_header(input: &HeaderInput, config: &QuorumConfig) -> Result<Verif
         bucket_list_hash: header.bucket_list_hash,
         previous_ledger_hash: header.previous_ledger_hash,
     })
+}
+
+pub fn authenticate_core(
+    input: &HeaderInput,
+    config: &QuorumConfig,
+    next: Option<SuccessorEvidence<'_>>,
+) -> Result<(VerifiedLedger, Authentication)> {
+    let ledger_hash: [u8; 32] = Sha256::digest(&input.ledger_header_xdr).into();
+
+    if let Some(expected) = input.recorded_ledger_hash {
+        if ledger_hash != expected {
+            return Err(VerifyError::LedgerHashMismatch {
+                expected: hex::encode(expected),
+                computed: hex::encode(ledger_hash),
+            });
+        }
+    }
+
+    let into_verified = |header: &LedgerHeader| VerifiedLedger {
+        slot: input.slot,
+        ledger_hash,
+        close_time: header.close_time,
+        tx_set_result_hash: header.tx_set_result_hash,
+        bucket_list_hash: header.bucket_list_hash,
+        previous_ledger_hash: header.previous_ledger_hash,
+    };
+
+    let (verified, authentication) = match next {
+        Some((successor_envelopes_xdr, successor_quorum_sets_xdr, successor_tx_set_xdr)) => {
+            let authenticated = verify::verify_update(
+                &config.trust_root,
+                &UpdateEvidence {
+                    network_id: &input.network_id,
+                    slot: input.slot,
+                    header_xdr: &input.ledger_header_xdr,
+                    envelopes_xdr: &input.envelopes_xdr,
+                    quorum_sets_xdr: &input.quorum_sets_xdr,
+                    successor_envelopes_xdr,
+                    successor_quorum_sets_xdr,
+                    successor_tx_set_xdr,
+                },
+            )
+            .map_err(|error| from_scp(error, input.envelopes_xdr.len()))?;
+
+            (into_verified(authenticated.header()), Authentication::Full)
+        }
+        None => {
+            let bound = verify::verify_header(
+                &input.network_id,
+                &config.trust_root,
+                input.slot,
+                &input.envelopes_xdr,
+                &input.quorum_sets_xdr,
+                &input.ledger_header_xdr,
+            )
+            .map_err(|error| from_scp(error, input.envelopes_xdr.len()))?;
+
+            (into_verified(bound.header()), Authentication::ValueBound)
+        }
+    };
+
+    verify_previous_ledger(&verified.previous_ledger_hash, input.trusted_previous_hash)?;
+
+    Ok((verified, authentication))
 }
 
 pub fn describe_quorum_set(quorum_set: &QuorumSet) -> String {

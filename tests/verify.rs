@@ -82,7 +82,7 @@ fn verifies_testnet_4160279_including_the_next_slot_binding() {
         .collect();
     let preimages = steps::index_quorum_sets(&next.quorum_sets_xdr).expect("preimages");
     let signers = steps::verify_quorum_set_hashes(&next_envelopes, &preimages).expect("bound");
-    steps::verify_quorum(&config, &signers).expect("next slot is a quorum");
+    steps::verify_quorum(&config.local, &signers).expect("next slot is a quorum");
     let next_value = steps::verify_externalized_value(&next_envelopes).expect("one value");
 
     steps::verify_next_slot_binding(&next_value, &next.tx_set_xdr, &v.ledger_hash)

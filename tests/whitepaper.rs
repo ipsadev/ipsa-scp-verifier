@@ -35,15 +35,14 @@ fn encode(qset: &QuorumSet) -> Vec<u8> {
     out
 }
 
-fn trust_root(qset: &QuorumSet) -> QuorumConfig {
-    QuorumConfig::from_xdr(&encode(qset)).expect("the trust root is sane")
+fn trust_root(qset: &QuorumSet) -> QuorumSet {
+    QuorumConfig::from_xdr(&encode(qset))
+        .expect("the trust root is sane")
+        .local
 }
 
-fn unchecked_trust_root(qset: &QuorumSet) -> QuorumConfig {
-    QuorumConfig {
-        local: qset.clone(),
-        raw: encode(qset),
-    }
+fn unchecked_trust_root(qset: &QuorumSet) -> QuorumSet {
+    qset.clone()
 }
 
 fn slices(pairs: &[(NodeId, QuorumSet)], id: &NodeId) -> Option<QuorumSet> {
@@ -109,7 +108,7 @@ fn a_quorum_contains_a_slice_for_each_of_its_members() {
     }
 
     assert!(
-        is_quorum_slice(&root.local, &survived),
+        is_quorum_slice(&root, &survived),
         "the trust root has no slice inside the quorum"
     );
 }
